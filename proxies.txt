@@ -1,1 +1,0 @@
-tg://proxy?server=185.86.146.161&port=443&secret=2f22523a9fdd8fa67e391a31db65b614
