@@ -1,14 +1,2 @@
-tg://proxy?server=201.4.76.18&port=443&secret=ee3f8a91c2d7e04b6a9f12c5e8370bd4aa786170692e6f7a6f6e2e7275
-tg://proxy?server=185.157.215.137&port=6665&secret=eeb7cd9aded0a6d2070dece5776522a84c706574726f766963682e7275
-tg://proxy?server=201.7.27.188&port=443&secret=ee6f8c7d9193585ada7d22acf074ad6d976d2e6265626f6f2e7275
-tg://proxy?server=85.192.35.94&port=443&secret=ddf390d9757cb92d87826bcef28a6e75ed
-tg://proxy?server=212.118.53.195&port=443&secret=dd4482437e89f9af8929514eee7faaf61f
-tg://proxy?server=201.4.76.18&port=443&secret=ee3f8a91c2d7e04b6a9f12c5e8370bd4aa27786170692e6f7a6f6e2e727527
-tg://proxy?server=90.156.217.42&port=9443&secret=ddee766b2e636f6da198edcc5871e97f94
-tg://proxy?server=185.179.83.26&port=443&secret=ddc844fd5dfe798923b22352ae03c00338
-tg://proxy?server=90.156.219.98&port=9443&secret=ddee766b2e636f6d2a75fd00ce69824700
-tg://proxy?server=31.76.85.93&port=443&secret=dd7e3e280965afa8cdaa660a13ba4590c2
-tg://proxy?server=90.156.216.188&port=8443&secret=ddee676f6f676c652e636f6de21ff0db1d
-tg://proxy?server=85.192.32.223&port=443&secret=ddf390d9757cb92d87826bcef28a6e75ed
-tg://proxy?server=144.31.164.41&port=122&secret=fc9fa457c4e5a3dbb7b8d5b93f4f9754
-tg://proxy?server=72.56.100.101&port=443&secret=91ae0196ac05bbcd9554b304efa8caa6
+tg://proxy?server=3.3.3.3&port=443&secret=ee33
+tg://proxy?server=1.1.1.1&port=443&secret=ee11
