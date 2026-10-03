@@ -1,1 +1,2 @@
-tg://proxy?server=13.141.56.167&port=4515&secret=eee9a4f23b1d768c04a8d7f39120ca5b6e626973636f7474692e79656b74616e65742e636f6d#⚡0.04MBs
+tg://proxy?server=3.3.3.3&port=443&secret=ee33#⚡5.10MBs
+tg://proxy?server=1.1.1.1&port=443&secret=ee11#⚡2.50MBs
