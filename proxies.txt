@@ -1,5 +1,5 @@
-tg://proxy?server=34.91.179.170&port=443&secret=dd1a452ca2531bf0b6120cc3008ec6580b#⚡0.12MBs
-tg://proxy?server=34.6.77.179&port=443&secret=dd874b3dac836b10b2bef91d46d0124863#⚡0.12MBs
-tg://proxy?server=34.34.69.221&port=443&secret=dd15681a893dce1de72b83eb0a12d3dcac#⚡0.12MBs
-tg://proxy?server=95.217.26.76&port=8443&secret=dd104462821249bd7ac519130220c25d09#⚡0.12MBs
-tg://proxy?server=194.60.228.63&port=8880&secret=dd79e344818749bd7ac519130220c25d09#⚡0.12MBs
+tg://proxy?server=88.198.67.154&port=42223&secret=ee806f1e6b70f6a7c119c94ba66cee0a97647a656e2e7275#⚡0.05MBs
+tg://proxy?server=34.91.179.170&port=443&secret=dd1a452ca2531bf0b6120cc3008ec6580b#⚡0.05MBs
+tg://proxy?server=34.6.77.179&port=443&secret=dd874b3dac836b10b2bef91d46d0124863#⚡0.05MBs
+tg://proxy?server=34.34.69.221&port=443&secret=dd15681a893dce1de72b83eb0a12d3dcac#⚡0.05MBs
+tg://proxy?server=77.90.183.67&port=443&secret=dd10db98efe3ca23e84ff2c28b3e99e2f1#⚡0.05MBs
