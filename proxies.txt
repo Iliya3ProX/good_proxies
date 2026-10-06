@@ -1,2 +1,5 @@
-tg://proxy?server=1.1.1.1&port=443&secret=ee11
-tg://proxy?server=2.2.2.2&port=443&secret=dd22
+tg://proxy?server=135.181.129.164&port=443&secret=dd79e7010200010007f0030386e24c3add#⚡0.12MBs
+tg://proxy?server=194.60.228.63&port=8880&secret=dd79e344818749bd7ac519130220c25d09#⚡0.12MBs
+tg://proxy?server=46.228.205.168&port=8443&secret=1603010200010001fc030386e24c3add#⚡0.12MBs
+tg://proxy?server=89.163.152.190&port=8443&secret=1603010200010001fc030386e24c3add#⚡0.12MBs
+tg://proxy?server=89.163.231.134&port=8443&secret=1603010200010001fc030386e24c3add#⚡0.12MBs
