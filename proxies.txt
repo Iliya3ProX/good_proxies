@@ -1,2 +1,2 @@
-tg://proxy?server=3.3.3.3&port=443&secret=ee33#⚡5.10MBs
-tg://proxy?server=1.1.1.1&port=443&secret=ee11#⚡2.50MBs
+tg://proxy?server=1.1.1.1&port=443&secret=ee11
+tg://proxy?server=2.2.2.2&port=443&secret=dd22
