@@ -1,3 +1,5 @@
-vless://uuid-1@1.2.3.4:443?security=reality#Test1
-vless://uuid-2@5.6.7.8:443?security=reality#Test2
-vless://uuid-3@9.10.11.12:8443#Test3
+tg://proxy?server=158.160.215.19&port=443&secret=eef7a565db46f8f5bf156054d86db42969617669746f2e7275#Tier1
+tg://proxy?server=130.193.56.139&port=443&secret=ee6a0333c1db3f8eaba5c76731a44203b6617669746f2e7275#Tier1
+tg://proxy?server=130.193.56.139&port=443&secret=eefc2612ff65a557fddf1d1b334395ef23617669746f2e7275#Tier1
+tg://proxy?server=158.160.232.207&port=443&secret=eebbb00c5d6d8a742b1a762499eb7d4912617669746f2e7275#Tier1
+tg://proxy?server=158.160.232.207&port=443&secret=ee3cd8b9e99a48486b14d0f6169d0b8d06617669746f2e7275#Tier1
