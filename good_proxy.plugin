@@ -36,16 +36,16 @@ PROXIES_URLS = [
 ]
 
 PLUGIN_UPDATE_URLS = [
-    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
     "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
-    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies@main/good_proxy.plugin",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
 ]
 
 VLESS_URLS = [
-    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/vless_keys.txt",
     "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/vless_keys.txt",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/vless_keys.txt",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/vless_keys.txt",
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies@main/vless_keys.txt",
     "https://storage.yandexcloud.net/v1ess-adress/vless%20adress.txt",
     "https://cdn.jsdelivr.net/gh/igareck/vpn-configs-for-russia@main/BLACK_VLESS_RUS_mobile.txt",
@@ -1707,14 +1707,23 @@ class ProxyManagerPlugin(BasePlugin):
         def task():
             remote_bytes = None
             remote_version = None
-            for url in PLUGIN_UPDATE_URLS:
+            errors = []
+            for base_url in PLUGIN_UPDATE_URLS:
+                host = urlparse(base_url).hostname or base_url
+                sep = "&" if "?" in base_url else "?"
+                url = f"{base_url}{sep}t={int(time.time())}"
                 try:
                     req = urllib.request.Request(
                         url,
-                        headers={"User-Agent": f"GoodProxy/{__version__} (Android Updater)"},
+                        headers={
+                            "User-Agent": f"GoodProxy/{__version__} (Android Updater)",
+                            "Cache-Control": "no-cache",
+                            "Pragma": "no-cache",
+                        },
                     )
                     with urllib.request.urlopen(req, timeout=10) as resp:
-                        if resp.getcode() == 200:
+                        code = resp.getcode()
+                        if code == 200:
                             data = resp.read(2 * 1024 * 1024)
                             header_sample = data[:3000].decode("utf-8", errors="ignore")
                             m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
@@ -1722,13 +1731,20 @@ class ProxyManagerPlugin(BasePlugin):
                                 remote_version = m.group(1).strip()
                                 remote_bytes = data
                                 break
+                            else:
+                                errors.append(f"{host}: версия не распознана")
+                        else:
+                            errors.append(f"{host}: HTTP {code}")
                 except Exception as e:
+                    err_msg = f"{type(e).__name__}: {str(e)[:80]}"
+                    errors.append(f"{host}: {err_msg}")
                     _log(f"Check update mirror {url} failed: {e}")
                     continue
 
             if not remote_bytes or not remote_version:
                 if manual:
-                    _notify("error", "Не удалось проверить обновления плагина. Проверьте интернет-соединение.")
+                    details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
+                    _notify("error", f"Не удалось проверить обновления плагина:\n{details}")
                 return
 
             if _parse_semver(remote_version) > _parse_semver(__version__):
@@ -1739,7 +1755,7 @@ class ProxyManagerPlugin(BasePlugin):
                     with open(plugin_file, "wb") as f:
                         f.write(remote_bytes)
                     _log(f"Plugin successfully updated to v{remote_version}")
-                    _notify("success", f"🎉 Плагин Good Proxy обновлен до v{remote_version}!\nПерезапустите Telegram для применения изменений.")
+                    _notify("success", f"Плагин Good Proxy обновлен до v{remote_version}!\nПерезапустите Telegram для применения изменений.")
                 except Exception as e:
                     _log(f"Failed to write updated plugin file: {e}")
                     if manual:
