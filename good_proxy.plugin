@@ -14,14 +14,14 @@ from client_utils import PLUGINS_QUEUE, get_last_fragment, get_user_config, run_
 from hook_utils import find_class, get_private_field, set_private_field
 from ui.bulletin import BulletinHelper
 from java import dynamic_proxy, jclass
-from java.lang import Integer
+from java.lang import Boolean as JBoolean, Integer
 from org.telegram.tgnet import TLRPC
 
 __id__ = "good_proxy"
 __name__ = "Good Proxy"
-__description__ = "Пошаговая инструкция, удобные уведомления, рейтинг скорости прокси и ссылки подключения."
-__author__ = "@MouXoziain"
-__version__ = "1.13.0"
+__description__ = "Сборщик рабочих прокси из открытых источников."
+__author__ = "@MouXoziain & Gemini"
+__version__ = "1.14.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -42,17 +42,8 @@ PLUGIN_UPDATE_URLS = [
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
 ]
 
-VLESS_URLS = [
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/vless_keys.txt",
-    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/vless_keys.txt",
-    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/vless_keys.txt",
-    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies@main/vless_keys.txt",
-    "https://storage.yandexcloud.net/v1ess-adress/vless%20adress.txt",
-    "https://cdn.jsdelivr.net/gh/igareck/vpn-configs-for-russia@main/BLACK_VLESS_RUS_mobile.txt",
-]
 
-
-def _copy_to_clipboard(text, label="GoodProxy_VLESS"):
+def _copy_to_clipboard(text, label="GoodProxy_Proxies"):
     """Копирует текст в буфер обмена Android (через AndroidUtilities или ClipboardManager)."""
     try:
         from org.telegram.messenger import AndroidUtilities
@@ -149,37 +140,6 @@ def _notify(kind, message):
     return True
 
 
-def _utf16_units(value):
-    return len(str(value).encode("utf-16-le")) // 2
-
-
-def _split_utf16_text(text, max_units):
-    """Split without breaking Unicode characters, preferring line boundaries."""
-    remaining = str(text or "")
-    chunks = []
-    limit = max(1, int(max_units))
-    while remaining:
-        if _utf16_units(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        units = 0
-        cut = 0
-        for index, char in enumerate(remaining):
-            char_units = 2 if ord(char) > 0xFFFF else 1
-            if units + char_units > limit:
-                break
-            units += char_units
-            cut = index + 1
-        if cut <= 0:
-            cut = 1
-        newline = remaining.rfind("\n", 0, cut)
-        if newline > cut // 2:
-            cut = newline + 1
-        chunks.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip("\n")
-    return chunks or [""]
-
-
 def _format_speed_mbps(total_bytes, elapsed):
     """Return decimal MB/s and a concise label, rounding sub-1000 KB/s to tenths."""
     seconds = max(0.001, float(elapsed or 0.001))
@@ -242,112 +202,17 @@ def _proxy_connection_link(host, port, settings=None, proxy_type="", secret=""):
 
 
 def _send_saved_output(message, title=None):
-    """Quote outputs of at most two messages; bigger outputs become one .txt document."""
-    text = str(message or "").strip()
-    if not text:
-        return True
-    heading = str(title or f"Good Proxy v{__version__} — вывод").strip()
-    needs_file = _utf16_units(text) > 7000
-    chunks = None if needs_file else _split_utf16_text(text, 3500)
-    if chunks is not None and len(chunks) > 2:
-        needs_file = True
-    peer_id = None
-    file_path = None
-    sent_count = 0
-    try:
-        config = get_user_config()
-        peer_id = config.getClientUserId() if config is not None else None
-        if not peer_id:
-            raise RuntimeError("Saved Messages peer unavailable")
-
-        if needs_file:
-            from client_utils import send_document
-            from file_utils import get_plugins_dir
-            directory = str(get_plugins_dir())
-            os.makedirs(directory, exist_ok=True)
-            file_path = os.path.join(
-                directory,
-                f"good_proxy_output_{int(time.time() * 1000)}_{threading.get_ident()}.txt",
-            )
-            full_text = heading + "\n\n" + text
-            with open(file_path, "w", encoding="utf-8", newline="\n") as output_file:
-                output_file.write(full_text)
-            send_document(peer_id, file_path, caption=heading + " — полный вывод приложен файлом")
-            sent_count += 1
-
-            def _remove_temporary_output(path=file_path):
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
-
-            cleanup_timer = threading.Timer(600.0, _remove_temporary_output)
-            cleanup_timer.daemon = True
-            cleanup_timer.start()
-            return True
-
-        if chunks is None:
-            chunks = _split_utf16_text(text, 3500)
-        for index, chunk in enumerate(chunks):
-            part_title = heading
-            if len(chunks) > 1:
-                part_title += f" ({index + 1}/{len(chunks)})"
-            prefix = part_title + "\n\n"
-            entity = TLRPC.TL_messageEntityBlockquote()
-            entity.collapsed = True
-            entity.offset = _utf16_units(prefix)
-            entity.length = _utf16_units(chunk)
-            entities = [entity]
-            try:
-                for match in _SAVED_OUTPUT_URL_RE.finditer(chunk):
-                    url_entity = TLRPC.TL_messageEntityUrl()
-                    url_entity.offset = _utf16_units(prefix + chunk[:match.start()])
-                    url_entity.length = _utf16_units(match.group(0))
-                    entities.append(url_entity)
-            except Exception:
-                pass
-            send_message({
-                "peer": peer_id,
-                "message": prefix + chunk,
-                "entities": entities,
-            })
-            sent_count += 1
-        return True
-    except Exception as e:
-        _log(f"Could not send Saved Messages output: {type(e).__name__}")
-        try:
-            if file_path and os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
-        if peer_id and sent_count == 0:
-            try:
-                fallback = f"Полный вывод не удалось отправить ({type(e).__name__})."
-                prefix = heading + "\n\n"
-                entity = TLRPC.TL_messageEntityBlockquote()
-                entity.collapsed = True
-                entity.offset = _utf16_units(prefix)
-                entity.length = _utf16_units(fallback)
-                send_message({
-                    "peer": peer_id,
-                    "message": prefix + fallback,
-                    "entities": [entity],
-                })
-            except Exception:
-                pass
-        return False
+    """Подавлен: сохранение технического вывода в «Избранное» отключено."""
+    _log(f"[{title or 'output'}] {str(message)[:240]}")
+    return True
 
 
 def _report_error(message):
-    """Send full diagnostics to Saved Messages and show a readable modal error."""
+    """Отображает ошибку пользователю через всплывающее уведомление без спама в «Избранное»."""
     detail = str(message or "Неизвестная ошибка")
-    sent = _send_saved_output(detail, title=f"Good Proxy v{__version__} — ошибка")
-    if sent:
-        _log(f"Error sent to Saved Messages: {detail[:240]}")
-        visible = detail + "\n\nПолный отчёт также сохранён в «Избранном»."
-    else:
-        visible = detail + "\n\nНе удалось сохранить полный отчёт в «Избранном»."
+    _log(f"Report error: {detail[:240]}")
+    _notify("error", detail)
+    return True
     _notify("error", visible)
     return sent
 
@@ -1280,11 +1145,13 @@ class ProxyManagerPlugin(BasePlugin):
             except Exception as e:
                 _log(f"add DRAWER_MENU item error: {e}")
 
+            # -- Автоматическое скрытие спонсора прокси во всех условиях --
+            self._install_proxy_sponsor_hider()
+
             # -- Хуки на активность списка прокси --
             ActivityCls = _resolve_class("org.telegram.ui.ProxyListActivity")
             if not ActivityCls:
                 _log("ProxyListActivity not found")
-                self._maybe_show_install_guide()
                 return
 
             # Кнопка обновления в верхнем меню (ActionBar)
@@ -1393,7 +1260,6 @@ class ProxyManagerPlugin(BasePlugin):
                         self.hook_method(m, BindHook())
 
             _log(f"Plugin v{__version__} loaded successfully")
-            self._maybe_show_install_guide()
             try:
                 threading.Timer(6.0, lambda: self._check_plugin_update(manual=False)).start()
             except Exception as e:
@@ -1402,121 +1268,44 @@ class ProxyManagerPlugin(BasePlugin):
             _log(f"on_plugin_load error: {e}")
             _notify("error", f"Не удалось полностью запустить Good Proxy: {type(e).__name__}.\n{str(e)[:350]}")
 
-    def _finish_onboarding(self):
-        self._onboarding_dialog_open = False
+    def _install_proxy_sponsor_hider(self):
+        """Блокировка поиска и запроса спонсорских каналов прокси."""
         try:
-            self.set_setting("good_proxy_onboarding_v111_seen", True)
-        except Exception as e:
-            _log(f"save onboarding state failed: {type(e).__name__}")
-
-    def _show_onboarding_step(self, step_index):
-        steps = [
-            (
-                "Шаг 1 из 5 — откройте список прокси",
-                "Откройте в клиенте экран со списком прокси — тот, где виден переключатель «Использовать прокси». "
-                "Пошаговая подсказка рассчитана на экран списка прокси ExteraGram/AyuGram.",
-            ),
-            (
-                "Шаг 2 из 5 — найдите кнопки Good Proxy",
-                "Внизу списка появятся действия Good Proxy: «Получить новый список», «Экспортировать прокси», "
-                "«Проверить и удалить нерабочие» и «Проверить скорость скачивания». "
-                "Кнопка со значком загрузки в верхней панели обновляет список Good Proxy. "
-                "Удаление запускайте только если действительно хотите убрать недоступные записи.",
-            ),
-            (
-                "Шаг 3 из 5 — задайте файл для замера",
-                "Отправьте файл-документ в «Избранное», скопируйте ID сообщения или ссылку на него и вставьте "
-                "в настройках Good Proxy в поле «ID/ссылка сообщения с тестовым файлом». Для теста используется "
-                "реальное скачивание файла через Telegram. В настройках также можно выбрать объём и лимит прокси; "
-                "лимит 0 означает все подходящие прокси.",
-            ),
-            (
-                "Шаг 4 из 5 — дождитесь штатной проверки",
-                "Перед пакетным замером запустите встроенную проверку доступности прокси в ExteraGram и дождитесь "
-                "завершённых статусов. Good Proxy использует именно эти результаты и не запускает отдельный TCP-пинг. "
-                "Для пакетной скорости попадут только завершённые прокси со статусом «доступен».",
-            ),
-            (
-                "Шаг 5 из 5 — запустите замер",
-                "На экране списка нажмите «Проверить скорость скачивания» для пакетного теста; перед стартом "
-                "появится подтверждение с оценкой трафика и времени. Либо выберите «Скорость текущего прокси» "
-                "в меню клиента, чтобы проверить только активный прокси. Во время пакетного теста маршрут "
-                "временно меняется только для выбранного аккаунта и затем восстанавливается.",
-            ),
-            (
-                "Готово — результаты и ошибки",
-                "Результаты сохраняются в «Избранном». После успешного замера последняя скорость добавляется "
-                "в начало встроенного имени прокси; это можно отключить переключателем «Последняя скорость "
-                "в названии прокси» в настройках Good Proxy. Ошибки показываются отдельным окном и не исчезают, "
-                "пока вы не нажмёте «Закрыть»; подробный отчёт также отправляется в «Избранное», когда это возможно.",
-            ),
-        ]
-        step_index = max(0, min(int(step_index), len(steps) - 1))
-
-        def _show():
-            try:
-                from ui.alert import AlertDialogBuilder
-                fragment = get_last_fragment()
-                context = fragment.getParentActivity() if fragment is not None else None
-                if context is None:
-                    self._onboarding_dialog_open = False
-                    _log("onboarding deferred: no current Activity")
-                    return
-                title, message = steps[step_index]
-                builder = AlertDialogBuilder(context)
-                builder.set_title("Good Proxy — " + title)
-                builder.set_message(message)
-
-                def _close(dialog, _which):
-                    dialog.dismiss()
-                    self._finish_onboarding()
-
-                def _next(dialog, _which, current=step_index):
-                    dialog.dismiss()
-                    self._show_onboarding_step(current + 1)
-
-                def _back(dialog, _which, current=step_index):
-                    dialog.dismiss()
-                    self._show_onboarding_step(current - 1)
-
-                if step_index < len(steps) - 1:
-                    builder.set_positive_button("Далее", _next)
-                    builder.set_negative_button("Закрыть", _close)
-                    if step_index > 0:
-                        builder.set_neutral_button("Назад", _back)
-                else:
-                    builder.set_positive_button("Готово", _close)
-                    builder.set_negative_button("Назад", _back)
-                    builder.set_neutral_button("Закрыть", _close)
-                builder.create()
-                builder.set_cancelable(False)
-                builder.set_canceled_on_touch_outside(False)
-                builder.show()
-            except Exception as e:
-                self._onboarding_dialog_open = False
-                _log(f"onboarding dialog failed: {type(e).__name__}: {e}")
-                _notify("error", f"Не удалось открыть инструкцию Good Proxy: {type(e).__name__}.")
-
-        run_on_ui_thread(_show)
-
-    def _maybe_show_install_guide(self):
-        try:
-            seen = self.get_setting("good_proxy_onboarding_v111_seen", False)
-            if isinstance(seen, str):
-                seen = seen.strip().lower() not in ("", "0", "false", "off", "no")
-            if bool(seen) or getattr(self, "_onboarding_dialog_open", False):
+            MessagesControllerCls = _resolve_class("org.telegram.messenger.MessagesController")
+            if not MessagesControllerCls:
                 return
-            self._onboarding_dialog_open = True
-            self._show_onboarding_step(0)
-        except Exception as e:
-            self._onboarding_dialog_open = False
-            _log(f"schedule onboarding failed: {type(e).__name__}")
 
-    def _on_show_onboarding_click(self, _view=None):
-        if getattr(self, "_onboarding_dialog_open", False):
-            return _notify("info", "Пошаговая инструкция уже открыта.")
-        self._onboarding_dialog_open = True
-        self._show_onboarding_step(0)
+            class PromoHook(MethodHook):
+                def before_hooked_method(self, param):
+                    param.setResult(None)
+
+            hook = PromoHook()
+            for m in MessagesControllerCls.getDeclaredMethods():
+                if m.getName() == "checkPromoInfo":
+                    try:
+                        self.hook_method(m, hook)
+                    except Exception as e:
+                        _log(f"hook checkPromoInfo error: {e}")
+        except Exception as e:
+            _log(f"sponsor hider error: {e}")
+
+    def _on_show_guide_click(self, _view=None):
+        guide_text = (
+            "Добро пожаловать в Good Proxy!\n\n"
+            "Плагин обеспечивает автоматический сбор, обновление и проверку стабильных MTProto-прокси прямо внутри Telegram.\n\n"
+            "Основные функции:\n"
+            "1. Автообновление списка:\n"
+            "Нажмите кнопку скачивания в правом верхнем углу списка прокси (или пункт «Получить новый список» внизу), чтобы загрузить актуальный рабочий пул.\n\n"
+            "2. Скрытие спонсоров:\n"
+            "Спонсорские каналы блокируются автоматически на этапе сетевого запроса — реклама в списке чатов никогда не отображается.\n\n"
+            "3. Замер реальной скорости:\n"
+            "Кнопка «Проверить скорость скачивания» внизу списка измеряет фактическую пропускную способность каждого сервера и выносит скорость в название.\n\n"
+            "4. Очистка нерабочих серверов:\n"
+            "Кнопка «Проверить и удалить нерабочие» в один клик убирает недоступные и медленные узлы из списка.\n\n"
+            "5. Экспорт:\n"
+            "Кнопка «Экспортировать прокси» копирует весь активный пул в буфер обмена для переноса на другие устройства."
+        )
+        run_on_ui_thread(lambda: _show_modal_alert("Инструкция Good Proxy", guide_text, "Понятно"))
 
     def create_settings(self) -> list:
         """Build settings defensively so one unavailable row cannot hide the page."""
@@ -1554,7 +1343,6 @@ class ProxyManagerPlugin(BasePlugin):
                     "Только Tier 1 (FakeTLS)",
                     "Только Tier 2 (TLS / random-pad)",
                     "Только Tier 3 (Стандартный MTProto)",
-                    "VPN-ключи (VLESS Reality)",
                 ],
                 subtext="Какую категорию прокси загружать при нажатии кнопки обновления списка.",
                 icon="msg_download",
@@ -1639,26 +1427,26 @@ class ProxyManagerPlugin(BasePlugin):
             rows.extend([
                 Header(text="Помощь"),
                 Text(
-                    text="Открыть пошаговую инструкцию",
-                    subtext="Повторно показать настройку Good Proxy от списка прокси до замера скорости.",
+                    text="Инструкция",
+                    subtext="Пошаговое описание всех возможностей и кнопок плагина.",
                     icon="msg_info",
-                    on_click=self._on_show_onboarding_click,
+                    on_click=self._on_show_guide_click,
                 ),
                 Header(text="Тест скорости и диагностика"),
                 Text(
                     text="Файл для реального теста",
-                    subtext="Отправьте файл-документ в «Избранное» и вставьте ID сообщения (или ссылку). Сначала запустите штатную проверку ExteraGram: скорость измеряется для завершённых статусов «доступен», журнал — в «Избранном».",
+                    subtext="Отправьте файл-документ в «Избранное» и вставьте ID сообщения (или ссылку). Скорость измеряется для прокси со статусом «доступен».",
                     icon="msg2_speed",
                 ),
                 Text(
                     text="Пинг зеркал и основного пути",
-                    subtext="Проверит все HTTPS-адреса; полный отчёт с задержками — в Избранном.",
+                    subtext="Проверит доступность всех HTTPS-зеркал плагина.",
                     icon="msg_retry",
                     on_click=self._on_test_sources_click,
                 ),
                 Text(
                     text="Синхронизировать прокси с меню Telegram",
-                    subtext="Переносит прокси в ProxyController; при сбое подробности отправляются в Избранное.",
+                    subtext="Синхронизирует прокси с внутренним контроллером клиента.",
                     icon="msg_retry",
                     on_click=self._on_sync_proxy_list_click,
                 ),
@@ -3896,7 +3684,7 @@ class ProxyManagerPlugin(BasePlugin):
         except Exception:
             mode_idx = 0
 
-        # Режимы: 1: Все, 2: Tier 1, 3: Tier 2, 4: Tier 3, 5: VLESS
+        # Режимы: 1: Все, 2: Tier 1, 3: Tier 2, 4: Tier 3
         if mode_idx == 1:
             self._fetch_proxies(tier_filter=0)
             return
@@ -3908,9 +3696,6 @@ class ProxyManagerPlugin(BasePlugin):
             return
         elif mode_idx == 4:
             self._fetch_proxies(tier_filter=3)
-            return
-        elif mode_idx == 5:
-            self._fetch_and_export_vless()
             return
 
         # Режим 0: Спрашивать при импорте
@@ -3928,7 +3713,6 @@ class ProxyManagerPlugin(BasePlugin):
                     "🔒 Tier 2 (TLS / random-pad)",
                     "⚡ Tier 3 (Стандартный MTProto)",
                     "🌐 Все категории (Tier 1, 2, 3)",
-                    "🔑 VPN-ключи (VLESS Reality)",
                 ]
 
                 builder = AlertDialogBuilder(context)
@@ -3939,12 +3723,9 @@ class ProxyManagerPlugin(BasePlugin):
                         dialog.dismiss()
                     except Exception:
                         pass
-                    tier_map = {0: 1, 1: 2, 2: 3, 3: 0, 4: -1}
+                    tier_map = {0: 1, 1: 2, 2: 3, 3: 0}
                     selected_tier = tier_map.get(int(which), 0)
-                    if selected_tier == -1:
-                        self._fetch_and_export_vless()
-                    else:
-                        self._fetch_proxies(tier_filter=selected_tier)
+                    self._fetch_proxies(tier_filter=selected_tier)
 
                 builder.set_items(items, on_item)
                 builder.set_negative_button("Отмена", lambda d, _w: d.dismiss())
@@ -3954,75 +3735,6 @@ class ProxyManagerPlugin(BasePlugin):
                 self._fetch_proxies(tier_filter=0)
 
         run_on_ui_thread(show_dialog)
-
-    def _fetch_and_export_vless(self):
-        _notify("info", "Загружаем VLESS-ключи…")
-        run_on_queue(self._do_fetch_vless, PLUGINS_QUEUE)
-
-    def _do_fetch_vless(self):
-        keys = []
-        source_errors = []
-        urls = list(VLESS_URLS)
-        try:
-            use_ghproxy = bool(self.get_setting("use_ghproxy", True))
-        except Exception:
-            use_ghproxy = True
-        if not use_ghproxy:
-            urls = [u for u in urls if "ghproxy.net" not in u.lower()]
-
-        for url in urls:
-            host = urlparse(url).hostname or url
-            try:
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        "User-Agent": f"GoodProxy/{__version__} (Android)",
-                        "Accept": "text/plain,*/*;q=0.8",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=12) as resp:
-                    status = int(resp.getcode() or 0)
-                    body = resp.read(2 * 1024 * 1024 + 1)
-                if status != 200:
-                    source_errors.append(f"{host}: HTTP {status}")
-                    continue
-                text = body.decode("utf-8", errors="replace")
-                vless_lines = [l.strip() for l in text.splitlines() if l.strip().startswith("vless://")]
-                if vless_lines:
-                    dedup = {}
-                    for vl in vless_lines:
-                        m = re.match(r"^vless://([^@]+)@([^:/?#]+):(\d+)", vl)
-                        k = f"{m.group(2).lower()}:{m.group(3)}:{m.group(1).lower()}" if m else vl.split("#")[0]
-                        if k not in dedup:
-                            dedup[k] = vl
-                    keys = list(dedup.values())
-                    break
-            except Exception as e:
-                source_errors.append(f"{host}: {type(e).__name__}: {str(e)[:100]}")
-                _log(f"VLESS fetch failed for {url}: {e}")
-
-        if not keys:
-            details = "\n".join(source_errors[:4]) or "Источники VLESS не вернули данных."
-            return _report_error("Не удалось загрузить VLESS-ключи.\n" + details)
-
-        full_vless_text = "\n".join(keys)
-        clipboard_ok = _copy_to_clipboard(full_vless_text, label="GoodProxy_VLESS")
-        sent_saved = _send_saved_output(full_vless_text, title=f"Good Proxy — {len(keys)} VLESS VPN ключей")
-
-        clip_status = "скопированы в буфер обмена Android" if clipboard_ok else "буфер обмена недоступен"
-        saved_status = "отправлены файлом в «Избранное»" if sent_saved else "не удалось отправить в «Избранное»"
-
-        msg = (
-            f"Успешно получено {len(keys)} VLESS-ключей!\n\n"
-            f"1. Ключи {clip_status}.\n"
-            f"   В приложении (v2rayNG / Hiddify / Nekobox / Streisand) нажмите «Импорт из буфера обмена».\n\n"
-            f"2. Ключи {saved_status} в Telegram для постоянного доступа."
-        )
-
-        def _show_result():
-            _show_modal_alert("Good Proxy — VLESS VPN", msg, "Отлично")
-        run_on_ui_thread(_show_result)
-        _notify("success", f"Получено {len(keys)} VLESS-ключей! Скопировано в буфер.")
 
     def _fetch_proxies(self, tier_filter=None):
         if tier_filter is None:
@@ -4303,9 +4015,8 @@ class ProxyManagerPlugin(BasePlugin):
             if not lines:
                 return _report_error("Не удалось сформировать список.")
             txt = "\n".join(lines)
-            if not _send_saved_output(txt, title=f"Good Proxy v{__version__} — экспорт прокси"):
-                return _notify("error", "Не удалось отправить экспорт в «Избранное».")
-            _notify("success", f"Экспортировано {len(lines)} прокси в Избранное.")
+            _copy_to_clipboard(txt, label="GoodProxy_Export")
+            _notify("success", f"Экспортировано {len(lines)} прокси! Скопировано в буфер обмена.")
         except Exception as e:
             _log(f"export error: {e}")
             _report_error(f"Ошибка экспорта: {e}")
