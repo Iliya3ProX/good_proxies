@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -1276,51 +1276,63 @@ class ProxyManagerPlugin(BasePlugin):
     def create_settings(self) -> list:
         """Build settings defensively so one unavailable row cannot hide the page."""
         try:
-            from ui.settings import Header
+            from ui.settings import Divider, Header, Selector, Switch, Text
         except Exception as e:
-            _log(f"create_settings: ui.settings.Header unavailable: {e}")
+            _log(f"create_settings: ui.settings unavailable: {e}")
             return []
 
-        rows = [Header(text="Good Proxy — настройки")]
+        rows = []
 
         # --- Секция 1: Импорт прокси ---
         try:
-            from ui.settings import Selector, Switch, Text
             rows.append(Header(text="Импорт прокси"))
-            rows.append(Selector(
-                key="import_tier_mode",
-                text="Категория при импорте",
-                default=0,
-                items=[
-                    "Спрашивать при импорте",
-                    "Все (Tier 1, 2, 3)",
-                    "Только Tier 1 (FakeTLS)",
-                    "Только Tier 2 (TLS / random-pad)",
-                    "Только Tier 3 (Стандартный MTProto)",
-                ],
-                subtext="Какую категорию прокси загружать при обновлении списка.",
-                icon="msg_download",
-            ))
-            rows.append(Switch(
-                key="use_ghproxy",
-                text="Зеркало ghproxy.net",
-                default=True,
-                subtext="Обход сетевых блокировок GitHub в РФ.",
-                icon="msg_link",
-            ))
-            rows.append(Switch(
-                key="auto_update_plugin",
-                text="Автообновление плагина",
-                default=True,
-                subtext="Проверять обновления плагина на GitHub при старте.",
-                icon="msg_retry",
-            ))
+            try:
+                rows.append(Selector(
+                    key="import_tier_mode",
+                    text="Категория при импорте",
+                    default=0,
+                    items=[
+                        "Спрашивать при импорте",
+                        "Все (Tier 1, 2, 3)",
+                        "Только Tier 1 (FakeTLS)",
+                        "Только Tier 2 (TLS / random-pad)",
+                        "Только Tier 3 (Стандартный MTProto)",
+                    ],
+                    icon="msg_download",
+                ))
+            except Exception as e:
+                _log(f"create_settings Selector error: {e}")
+
+            try:
+                rows.append(Switch(
+                    key="use_ghproxy",
+                    text="Зеркало ghproxy.net",
+                    default=True,
+                    subtext="Обход сетевых блокировок GitHub в РФ.",
+                    icon="msg_link",
+                ))
+            except Exception as e:
+                _log(f"create_settings use_ghproxy error: {e}")
+
+            try:
+                rows.append(Switch(
+                    key="auto_update_plugin",
+                    text="Автообновление плагина",
+                    default=True,
+                    subtext="Проверять обновления плагина на GitHub при старте.",
+                    icon="msg_retry",
+                ))
+            except Exception as e:
+                _log(f"create_settings auto_update_plugin error: {e}")
         except Exception as e:
             _log(f"create_settings import section error: {e}")
 
         # --- Секция 2: Замер скорости ---
         try:
-            from ui.settings import Text
+            try:
+                rows.append(Divider())
+            except Exception:
+                pass
             rows.append(Header(text="Замер скорости"))
             rows.append(Text(
                 text="Скачать плагин для замера скорости",
@@ -1333,7 +1345,10 @@ class ProxyManagerPlugin(BasePlugin):
 
         # --- Секция 3: Справка и диагностика ---
         try:
-            from ui.settings import Text
+            try:
+                rows.append(Divider())
+            except Exception:
+                pass
             rows.append(Header(text="Справка и диагностика"))
             rows.append(Text(
                 text="Инструкция",

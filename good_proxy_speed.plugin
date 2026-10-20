@@ -21,7 +21,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -326,23 +326,26 @@ class GoodProxySpeedPlugin(BasePlugin):
 
     def create_settings(self) -> list:
         try:
-            from ui.settings import Header, Selector, Switch, Text
+            from ui.settings import Divider, Header, Selector, Switch, Text
         except Exception as e:
             _log(f"create_settings unavailable: {e}")
             return []
 
-        rows = [Header(text="Good Proxy Speed — настройки")]
+        rows = []
 
         try:
             rows.append(Header(text="Параметры замера скорости"))
-            rows.append(Selector(
-                key="speed_test_chunks",
-                text="Размер тестового файла",
-                default=2,
-                items=["2 МБ", "5 МБ", "10 МБ"],
-                subtext="Объём реальных данных, скачиваемых из Telegram при замере скорости.",
-                icon="msg2_speed",
-            ))
+            try:
+                rows.append(Selector(
+                    key="speed_test_chunks",
+                    text="Размер тестового файла",
+                    default=2,
+                    items=["2 МБ", "5 МБ", "10 МБ"],
+                    icon="msg2_speed",
+                ))
+            except Exception as e:
+                _log(f"create_settings Selector error: {e}")
+
             rows.append(Text(
                 text="Сгенерировать файл для теста скорости",
                 subtext="Создаст файл без расширения и отправит его в «Избранное».",
@@ -363,6 +366,10 @@ class GoodProxySpeedPlugin(BasePlugin):
                 subtext="Проверять обновления плагина на GitHub при старте.",
                 icon="msg_retry",
             ))
+            try:
+                rows.append(Divider())
+            except Exception:
+                pass
             rows.append(Header(text="Действия"))
             rows.append(Text(
                 text="Проверить скорость всех прокси",
@@ -376,6 +383,10 @@ class GoodProxySpeedPlugin(BasePlugin):
                 icon="msg2_speed",
                 on_click=self._on_check_current_proxy_speed,
             ))
+            try:
+                rows.append(Divider())
+            except Exception:
+                pass
             rows.append(Header(text="Справка и диагностика"))
             rows.append(Text(
                 text="Инструкция",
