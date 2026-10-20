@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.0.3"
+__version__ = "2.0.4"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -2205,144 +2205,132 @@ class ProxyManagerPlugin(BasePlugin):
         run_on_queue(lambda: self._do_fetch(tier_filter=tier_filter), PLUGINS_QUEUE)
 
     def _do_fetch(self, tier_filter=0):
-        parsed = {}
-        source_url = None
-        source_errors = []
-
-        # Do not stop at the first HTTP 200: mirrors sometimes return an HTML
-        # error page or an empty file with status 200. Continue until links parse.
-        for url in self._get_active_urls():
-            host = urlparse(url).hostname or url
-            try:
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        "User-Agent": f"GoodProxy/{__version__} (Android)",
-                        "Accept": "text/plain,*/*;q=0.8",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=12) as resp:
-                    status = int(resp.getcode() or 0)
-                    body = resp.read(2 * 1024 * 1024 + 1)
-                if status != 200:
-                    source_errors.append(f"{host}: HTTP {status}")
-                    continue
-                current = _parse_proxy_text(body)
-                if not current:
-                    source_errors.append(f"{host}: ответ получен, но прокси-ссылки не распознаны")
-                    _log(f"No proxy links in response from {url}; bytes={len(body)}")
-                    continue
-                parsed = current
-                source_url = url
-                break
-            except Exception as e:
-                source_errors.append(f"{host}: {type(e).__name__}: {str(e)[:100]}")
-                _log(f"Fetch failed for {url}: {e}")
-
-        if not parsed:
-            details = "\n".join(source_errors[:4]) or "Источники не вернули данных."
-            return _report_error("Не удалось загрузить прокси.\n" + details)
-
-        if tier_filter in (1, 2, 3):
-            filtered = [p for p in parsed if p.get("tier") == tier_filter]
-            if not filtered:
-                return _report_error(f"В источнике не найдено прокси с категорией Tier {tier_filter}.")
-            parsed = filtered
-
-        shared_sync_added = 0
-        shared_sync_duplicates = 0
-        shared_sync_failed = 0
-        shared_sync_error = None
-        shared_sync_save_error = None
         try:
-            SC = _shared_config()
-            load_proxy_list = getattr(SC, "loadProxyList", None)
-            if callable(load_proxy_list):
-                load_proxy_list()
-            proxy_controller = _get_proxy_controller()
-            proxy_list = _get_proxy_list(SC, proxy_controller)
-            if proxy_list is None:
-                raise RuntimeError("ProxyController/SharedConfig: список прокси недоступен")
-            if proxy_controller is not None and callable(getattr(proxy_controller, "addProxy", None)):
-                (
-                    shared_sync_added,
-                    shared_sync_duplicates,
-                    shared_sync_failed,
-                    shared_sync_error,
-                    shared_sync_save_error,
-                    synced_list,
-                ) = _sync_shared_list_into_controller(SC, proxy_controller)
-                if synced_list is not None:
-                    proxy_list = synced_list
-            existing = _proxy_list_keys(proxy_list)
-        except Exception as e:
-            _log(f"Cannot read Telegram proxy list: {e}")
-            return _report_error(
-                f"Список прокси Telegram недоступен: {type(e).__name__}: {str(e)[:160]}"
-            )
+            parsed = {}
+            source_url = None
+            source_errors = []
 
-        try:
-            ProxyInfo = jclass("org.telegram.messenger.SharedConfig$ProxyInfo")
-        except Exception as e:
-            _log(f"ProxyInfo class unavailable: {e}")
-            return _report_error(
-                f"В этой версии клиента не найден SharedConfig.ProxyInfo: {str(e)[:160]}"
-            )
-
-        added = failed = 0
-        first_add_error = ""
-        add_api_used = False
-        controller_api_used = False
-        direct_list_add_used = False
-        for proxy in parsed:
-            try:
-                info = _make_proxy_info(ProxyInfo, proxy)
-            except Exception as e:
-                failed += 1
-                if not first_add_error:
-                    first_add_error = f"ProxyInfo: {type(e).__name__}: {e}"
-                _log(f"ProxyInfo constructor failed for {proxy.get('host')}: {e}")
-                continue
-
-            before_size = _proxy_list_size(proxy_list)
-            add_error = None
-            add_call_succeeded = False
-            controller_add_called = False
-            try:
-                add_proxy = None
-                if proxy_controller is not None:
-                    add_proxy = getattr(proxy_controller, "addProxy", None)
-                    if callable(add_proxy):
-                        controller_add_called = True
-                if not callable(add_proxy):
-                    add_proxy = getattr(SC, "addProxy", None)
-                if not callable(add_proxy):
-                    raise AttributeError("ProxyController.addProxy/SharedConfig.addProxy отсутствует")
-                add_proxy(info)
-                add_call_succeeded = True
-            except Exception as e:
-                add_error = e
-                _log(f"Proxy add API failed for {key}: {e}")
-
-            refreshed_list = _get_proxy_list(SC, proxy_controller)
-            if refreshed_list is not None:
-                proxy_list = refreshed_list
-            after_keys = _proxy_list_keys(proxy_list)
-            after_size = _proxy_list_size(proxy_list)
-            inserted = key in after_keys or (
-                before_size is not None and after_size is not None and after_size > before_size
-            )
-            inserted_via_api = add_call_succeeded
-
-            # Direct-list fallback is only for legacy paths without Controller.addProxy.
-            if not inserted and not controller_add_called:
+            # Do not stop at the first HTTP 200: mirrors sometimes return an HTML
+            # error page or an empty file with status 200. Continue until links parse.
+            for url in self._get_active_urls():
+                host = urlparse(url).hostname or url
                 try:
-                    proxy_list.add(info)
-                except Exception as fallback_error:
-                    _log(f"proxyList.add fallback failed for {key}: {fallback_error}")
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "User-Agent": f"GoodProxy/{__version__} (Android)",
+                            "Accept": "text/plain,*/*;q=0.8",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        status = int(resp.getcode() or 0)
+                        body = resp.read(2 * 1024 * 1024 + 1)
+                    if status != 200:
+                        source_errors.append(f"{host}: HTTP {status}")
+                        continue
+                    current = _parse_proxy_text(body)
+                    if not current:
+                        source_errors.append(f"{host}: ответ получен, но прокси-ссылки не распознаны")
+                        _log(f"No proxy links in response from {url}; bytes={len(body)}")
+                        continue
+                    parsed = current
+                    source_url = url
+                    break
+                except Exception as e:
+                    source_errors.append(f"{host}: {type(e).__name__}: {str(e)[:100]}")
+                    _log(f"Fetch failed for {url}: {e}")
+
+            if not parsed:
+                details = "\n".join(source_errors[:4]) or "Источники не вернули данных."
+                return _report_error("Не удалось загрузить прокси.\n" + details)
+
+            if tier_filter in (1, 2, 3):
+                filtered = [p for p in parsed if p.get("tier") == tier_filter]
+                if not filtered:
+                    return _report_error(f"В источнике не найдено прокси с категорией Tier {tier_filter}.")
+                parsed = filtered
+
+            shared_sync_added = 0
+            shared_sync_duplicates = 0
+            shared_sync_failed = 0
+            shared_sync_error = None
+            shared_sync_save_error = None
+            try:
+                SC = _shared_config()
+                load_proxy_list = getattr(SC, "loadProxyList", None)
+                if callable(load_proxy_list):
+                    load_proxy_list()
+                proxy_controller = _get_proxy_controller()
+                proxy_list = _get_proxy_list(SC, proxy_controller)
+                if proxy_list is None:
+                    raise RuntimeError("ProxyController/SharedConfig: список прокси недоступен")
+                if proxy_controller is not None and callable(getattr(proxy_controller, "addProxy", None)):
+                    (
+                        shared_sync_added,
+                        shared_sync_duplicates,
+                        shared_sync_failed,
+                        shared_sync_error,
+                        shared_sync_save_error,
+                        synced_list,
+                    ) = _sync_shared_list_into_controller(SC, proxy_controller)
+                    if synced_list is not None:
+                        proxy_list = synced_list
+                existing = _proxy_list_keys(proxy_list)
+            except Exception as e:
+                _log(f"Cannot read Telegram proxy list: {e}")
+                return _report_error(
+                    f"Список прокси Telegram недоступен: {type(e).__name__}: {str(e)[:160]}"
+                )
+
+            try:
+                ProxyInfo = jclass("org.telegram.messenger.SharedConfig$ProxyInfo")
+            except Exception as e:
+                _log(f"ProxyInfo class unavailable: {e}")
+                return _report_error(
+                    f"В этой версии клиента не найден SharedConfig.ProxyInfo: {str(e)[:160]}"
+                )
+
+            added = failed = 0
+            first_add_error = ""
+            add_api_used = False
+            controller_api_used = False
+            direct_list_add_used = False
+            for proxy in parsed:
+                key = _proxy_key(
+                    proxy.get("host"),
+                    proxy.get("port"),
+                    proxy.get("secret", ""),
+                    proxy.get("type", "mtproto"),
+                )
+                try:
+                    info = _make_proxy_info(ProxyInfo, proxy)
+                except Exception as e:
+                    failed += 1
                     if not first_add_error:
-                        reason = add_error or fallback_error
-                        first_add_error = f"{type(reason).__name__}: {reason}"
+                        first_add_error = f"ProxyInfo: {type(e).__name__}: {e}"
+                    _log(f"ProxyInfo constructor failed for {proxy.get('host')}: {e}")
+                    continue
+
+                before_size = _proxy_list_size(proxy_list)
+                add_error = None
+                add_call_succeeded = False
+                controller_add_called = False
+                try:
+                    add_proxy = None
+                    if proxy_controller is not None:
+                        add_proxy = getattr(proxy_controller, "addProxy", None)
+                        if callable(add_proxy):
+                            controller_add_called = True
+                    if not callable(add_proxy):
+                        add_proxy = getattr(SC, "addProxy", None)
+                    if not callable(add_proxy):
+                        raise AttributeError("ProxyController.addProxy/SharedConfig.addProxy отсутствует")
+                    add_proxy(info)
+                    add_call_succeeded = True
+                except Exception as e:
+                    add_error = e
+                    _log(f"Proxy add API failed for {key}: {e}")
+
                 refreshed_list = _get_proxy_list(SC, proxy_controller)
                 if refreshed_list is not None:
                     proxy_list = refreshed_list
@@ -2351,75 +2339,98 @@ class ProxyManagerPlugin(BasePlugin):
                 inserted = key in after_keys or (
                     before_size is not None and after_size is not None and after_size > before_size
                 )
+                inserted_via_api = add_call_succeeded
 
-            if inserted:
-                added += 1
-                existing.add(key)
-                if inserted_via_api:
-                    add_api_used = True
-                    if controller_add_called:
-                        controller_api_used = True
+                # Direct-list fallback is only for legacy paths without Controller.addProxy.
+                if not inserted and not controller_add_called:
+                    try:
+                        proxy_list.add(info)
+                    except Exception as fallback_error:
+                        _log(f"proxyList.add fallback failed for {key}: {fallback_error}")
+                        if not first_add_error:
+                            reason = add_error or fallback_error
+                            first_add_error = f"{type(reason).__name__}: {reason}"
+                    refreshed_list = _get_proxy_list(SC, proxy_controller)
+                    if refreshed_list is not None:
+                        proxy_list = refreshed_list
+                    after_keys = _proxy_list_keys(proxy_list)
+                    after_size = _proxy_list_size(proxy_list)
+                    inserted = key in after_keys or (
+                        before_size is not None and after_size is not None and after_size > before_size
+                    )
+
+                if inserted:
+                    added += 1
+                    existing.add(key)
+                    if inserted_via_api:
+                        add_api_used = True
+                        if controller_add_called:
+                            controller_api_used = True
+                    else:
+                        direct_list_add_used = True
                 else:
-                    direct_list_add_used = True
+                    failed += 1
+                    if not first_add_error:
+                        reason = add_error or RuntimeError("элемент не появился в SharedConfig.proxyList")
+                        first_add_error = f"{type(reason).__name__}: {reason}"
+
+            try:
+                shared_count = _proxy_list_size(_get_shared_config_proxy_list(SC))
+            except Exception:
+                shared_count = None
+            try:
+                controller_count = _proxy_list_size(_get_proxy_list(SC, proxy_controller))
+            except Exception:
+                controller_count = None
+
+            save_error = shared_sync_save_error
+            if added:
+                source_save_error = _persist_proxy_list(
+                    SC,
+                    add_api_used and not direct_list_add_used,
+                    controller_api_used,
+                    direct_list_add_used,
+                    proxy_controller,
+                )
+                if source_save_error:
+                    save_error = source_save_error
+            if save_error:
+                _log(f"Could not persist proxy list: {save_error}")
+
+            self._refresh_proxy_list_ui()
+
+            host = urlparse(source_url).hostname or source_url
+            tier_tag = f" [Tier {tier_filter}]" if tier_filter in (1, 2, 3) else ""
+            summary = (
+                f"Источник: {host}{tier_tag}. Отобрано: {len(parsed)}. "
+                f"Добавлено в клиент: {added}."
+            )
+            if failed:
+                summary += f" Не удалось добавить из источника: {failed}."
+                if first_add_error:
+                    summary += f"\nПричина: {first_add_error[:1400]}"
+            if shared_count is not None or controller_count is not None:
+                shared_text = str(shared_count) if shared_count is not None else "недоступен"
+                controller_text = str(controller_count) if controller_count is not None else "недоступен"
+                summary += (
+                    f"\nProxyController: {controller_text}; SharedConfig: {shared_text}; "
+                    f"перенесено в Controller: {shared_sync_added}; уже было в Controller: {shared_sync_duplicates}."
+                )
+            if shared_sync_error:
+                summary += f"\nОшибка переноса SharedConfig → ProxyController: {shared_sync_error[:500]}"
+            if shared_sync_failed:
+                summary += f"\nОсталось перенести из SharedConfig: {shared_sync_failed}."
+            if save_error:
+                summary += f"\nОшибка сохранения: {type(save_error).__name__}: {str(save_error)[:180]}"
+
+            if failed or shared_sync_failed or save_error or shared_sync_error:
+                _report_error(summary)
             else:
-                failed += 1
-                if not first_add_error:
-                    reason = add_error or RuntimeError("элемент не появился в SharedConfig.proxyList")
-                    first_add_error = f"{type(reason).__name__}: {reason}"
+                _notify("success", summary)
 
-        try:
-            shared_count = _proxy_list_size(_get_shared_config_proxy_list(SC))
-        except Exception:
-            shared_count = None
-        try:
-            controller_count = _proxy_list_size(_get_proxy_list(SC, proxy_controller))
-        except Exception:
-            controller_count = None
-
-        save_error = shared_sync_save_error
-        if added:
-            source_save_error = _persist_proxy_list(
-                SC,
-                add_api_used and not direct_list_add_used,
-                controller_api_used,
-                direct_list_add_used,
-                proxy_controller,
-            )
-            if source_save_error:
-                save_error = source_save_error
-        if save_error:
-            _log(f"Could not persist proxy list: {save_error}")
-
-        self._refresh_proxy_list_ui()
-
-        host = urlparse(source_url).hostname or source_url
-        tier_tag = f" [Tier {tier_filter}]" if tier_filter in (1, 2, 3) else ""
-        summary = (
-            f"Источник: {host}{tier_tag}. Отобрано: {len(parsed)}. "
-            f"Добавлено в клиент: {added}."
-        )
-        if failed:
-            summary += f" Не удалось добавить из источника: {failed}."
-            if first_add_error:
-                summary += f"\nПричина: {first_add_error[:1400]}"
-        if shared_count is not None or controller_count is not None:
-            shared_text = str(shared_count) if shared_count is not None else "недоступен"
-            controller_text = str(controller_count) if controller_count is not None else "недоступен"
-            summary += (
-                f"\nProxyController: {controller_text}; SharedConfig: {shared_text}; "
-                f"перенесено в Controller: {shared_sync_added}; уже было в Controller: {shared_sync_duplicates}."
-            )
-        if shared_sync_error:
-            summary += f"\nОшибка переноса SharedConfig → ProxyController: {shared_sync_error[:500]}"
-        if shared_sync_failed:
-            summary += f"\nОсталось перенести из SharedConfig: {shared_sync_failed}."
-        if save_error:
-            summary += f"\nОшибка сохранения: {type(save_error).__name__}: {str(save_error)[:180]}"
-
-        if failed or shared_sync_failed or save_error or shared_sync_error:
-            _report_error(summary)
-        else:
-            _notify("success", summary)
+        except Exception as e:
+            _log(f"do_fetch fatal error: {type(e).__name__}: {e}")
+            return _report_error(f"Сбой импорта прокси: {type(e).__name__}: {str(e)[:160]}")
 
     def _export_proxies(self):
         run_on_queue(self._do_export, PLUGINS_QUEUE)
