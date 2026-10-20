@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -466,13 +466,13 @@ def _parse_proxy(line):
 
 
 def _parse_proxy_text(raw):
-    """Extract and de-duplicate proxy links from plain text, Markdown, HTML, or JSON."""
+    """Extract proxy links from plain text, Markdown, HTML, or JSON."""
     if isinstance(raw, bytes):
         text = raw.decode("utf-8-sig", errors="replace")
     else:
         text = str(raw or "").lstrip("\ufeff")
 
-    parsed = {}
+    parsed = []
 
     # Поддержка JSON-структур (proxies.json из GitVerse / Akres)
     trimmed = text.strip()
@@ -489,8 +489,7 @@ def _parse_proxy_text(raw):
                 secret = str(entry.get("secret", "") or "").strip()
                 via = entry.get("via")
                 if via:
-                    key = _proxy_key(server, 0, secret, proxy_type="web")
-                    parsed[key] = {
+                    parsed.append({
                         "host": server,
                         "port": 443,
                         "secret": secret,
@@ -498,21 +497,20 @@ def _parse_proxy_text(raw):
                         "tier": 1,
                         "type": "web",
                         "via": str(via),
-                    }
+                    })
                 else:
                     port = int(entry.get("port") or 0)
                     if 1 <= port <= 65535:
                         sec_lower = secret.lower()
                         tier = 1 if (sec_lower.startswith("ee") and len(sec_lower) > 34) else (2 if sec_lower.startswith("dd") else 3)
-                        key = _proxy_key(server, port, secret, proxy_type="mtproto")
-                        parsed[key] = {
+                        parsed.append({
                             "host": server,
                             "port": port,
                             "secret": secret,
                             "speed": "",
                             "tier": tier,
                             "type": "mtproto",
-                        }
+                        })
             if parsed:
                 return parsed
         except Exception:
@@ -526,14 +524,7 @@ def _parse_proxy_text(raw):
         for link in links:
             proxy = _parse_proxy(link)
             if proxy:
-                key = _proxy_key(proxy["host"], proxy["port"], proxy.get("secret", ""), proxy.get("type", "mtproto"))
-                previous = parsed.get(key)
-                if previous:
-                    if previous.get("speed") and not proxy.get("speed"):
-                        proxy["speed"] = previous["speed"]
-                    if previous.get("tier") and not proxy.get("tier"):
-                        proxy["tier"] = previous["tier"]
-                parsed[key] = proxy
+                parsed.append(proxy)
     return parsed
 
 
@@ -1191,13 +1182,11 @@ def _proxy_api_diagnostics():
 class ProxyManagerPlugin(BasePlugin):
     def on_plugin_load(self):
         try:
-            self._speed_cache = {}
             self._speed_context = None
             self._bulk_speed_busy = False
             self._bulk_speed_state = None
             self._cleanup_busy = False
             self._onboarding_dialog_open = False
-            self._load_speed_cache()
             plugin = self
 
             _log(f"Plugin v{__version__} loading...")
@@ -1397,22 +1386,10 @@ class ProxyManagerPlugin(BasePlugin):
 
         rows = [Header(text="Good Proxy — настройки")]
 
-        # Create rows independently: on older SDK builds a missing optional
-        # setting class must not make create_settings() return an empty page.
+        # --- Секция 1: Импорт прокси ---
         try:
-            from ui.settings import Switch
-            rows.append(Switch(
-                key="use_ghproxy",
-                text="Использовать зеркало ghproxy.net",
-                default=True,
-                subtext="Отключите, если это зеркало недоступно в вашей сети.",
-                icon="msg_link",
-            ))
-        except Exception as e:
-            _log(f"create_settings Switch error: {e}")
-
-        try:
-            from ui.settings import Selector
+            from ui.settings import Selector, Switch, Text
+            rows.append(Header(text="Импорт прокси"))
             rows.append(Selector(
                 key="import_tier_mode",
                 text="Категория при импорте",
@@ -1424,134 +1401,79 @@ class ProxyManagerPlugin(BasePlugin):
                     "Только Tier 2 (TLS / random-pad)",
                     "Только Tier 3 (Стандартный MTProto)",
                 ],
-                subtext="Какую категорию прокси загружать при нажатии кнопки обновления списка.",
+                subtext="Какую категорию прокси загружать при обновлении списка.",
                 icon="msg_download",
             ))
-        except Exception as e:
-            _log(f"create_settings import_tier_mode error: {e}")
-
-        try:
-            from ui.settings import Switch
+            rows.append(Switch(
+                key="use_ghproxy",
+                text="Зеркало ghproxy.net",
+                default=True,
+                subtext="Обход сетевых блокировок GitHub в РФ.",
+                icon="msg_link",
+            ))
             rows.append(Switch(
                 key="auto_update_plugin",
                 text="Автообновление плагина",
                 default=True,
-                subtext="Автоматически проверять и скачивать обновления плагина с GitHub при запуске.",
+                subtext="Проверять обновления плагина на GitHub при старте.",
                 icon="msg_retry",
             ))
         except Exception as e:
-            _log(f"create_settings auto_update_plugin error: {e}")
+            _log(f"create_settings import section error: {e}")
 
+        # --- Секция 2: Замер скорости ---
         try:
-            from ui.settings import Selector
+            from ui.settings import Selector, Switch, Text
+            rows.append(Header(text="Тест скорости"))
             rows.append(Selector(
                 key="speed_test_chunks",
-                text="Размер теста скорости",
-                default=1,
-                items=["512 КБ", "1 МБ", "2 МБ", "5 МБ", "10 МБ"],
-                subtext="Объём реального файла, скачиваемого из Telegram через текущий прокси.",
+                text="Размер файла для теста",
+                default=2,
+                items=["2 МБ", "5 МБ", "10 МБ"],
+                subtext="Объём тестовых данных, скачиваемых из Telegram.",
                 icon="msg2_speed",
             ))
-        except Exception as e:
-            _log(f"create_settings Selector error: {e}")
-
-        try:
-            from ui.settings import Selector
-            rows.append(Selector(
-                key="speed_test_all_chunks",
-                text="Размер скачивания на каждый прокси",
-                default=0,
-                items=["512 КБ", "1 МБ", "2 МБ"],
-                subtext="По умолчанию 512 КБ, чтобы ограничить расход трафика при проверке всего списка.",
-                icon="msg2_speed",
+            rows.append(Text(
+                text="Сгенерировать файл для теста скорости",
+                subtext="Создаст файл без расширения и отправит его в «Избранное».",
+                icon="msg_file",
+                on_click=self._on_generate_speed_file_click,
             ))
-        except Exception as e:
-            _log(f"create_settings all-speed Selector error: {e}")
-
-        try:
-            from ui.settings import Input
-            rows.append(Input(
-                key="speed_test_proxy_limit",
-                text="Количество прокси для проверки скорости",
-                default="0",
-                subtext="0 — проверить все доступные; положительное число — первые N доступных прокси по порядку списка.",
-                icon="msg2_speed",
-            ))
-        except Exception as e:
-            _log(f"create_settings proxy-limit Input error: {e}")
-
-        try:
-            from ui.settings import Input
-            rows.append(Input(
-                key="speed_test_message_id",
-                text="ID/ссылка сообщения с тестовым файлом",
-                default="",
-            ))
-        except Exception as e:
-            _log(f"create_settings speed-test Input error: {e}")
-
-        try:
-            from ui.settings import Switch
             rows.append(Switch(
                 key="speed_test_set_proxy_name",
-                text="Последняя скорость в названии прокси",
+                text="Записывать скорость в название",
                 default=True,
-                subtext="После успешного замера добавляет скорость в начало встроенного названия, сохраняя прежний текст.",
-                icon="msg2_speed",
+                subtext="Добавляет замеренную скорость прямо в имя прокси в клиенте.",
+                icon="msg_edit",
             ))
         except Exception as e:
-            _log(f"create_settings speed-name Switch error: {e}")
+            _log(f"create_settings speed section error: {e}")
 
+        # --- Секция 3: Справка и диагностика ---
         try:
             from ui.settings import Text
-            rows.extend([
-                Header(text="Помощь"),
-                Text(
-                    text="Инструкция",
-                    subtext="Пошаговое описание всех возможностей и кнопок плагина.",
-                    icon="msg_info",
-                    on_click=self._on_show_guide_click,
-                ),
-                Header(text="Тест скорости и диагностика"),
-                Text(
-                    text="Файл для реального теста",
-                    subtext="Отправьте файл-документ в «Избранное» и вставьте ID сообщения (или ссылку). Скорость измеряется для прокси со статусом «доступен».",
-                    icon="msg2_speed",
-                ),
-                Text(
-                    text="Пинг зеркал и основного пути",
-                    subtext="Проверит доступность всех HTTPS-зеркал плагина.",
-                    icon="msg_retry",
-                    on_click=self._on_test_sources_click,
-                ),
-                Text(
-                    text="Синхронизировать прокси с меню Telegram",
-                    subtext="Синхронизирует прокси с внутренним контроллером клиента.",
-                    icon="msg_retry",
-                    on_click=self._on_sync_proxy_list_click,
-                ),
-                Text(
-                    text="Сбросить кэш скоростей",
-                    subtext="Очистить сохранённые замеры скорости.",
-                    icon="msg_delete",
-                    red=True,
-                    on_click=self._on_clear_cache_click,
-                ),
-                Text(
-                    text="Проверить обновление плагина",
-                    subtext=f"Текущая версия Good Proxy: v{__version__}",
-                    icon="msg_download",
-                    on_click=self._on_check_update_click,
-                ),
-                Text(text=f"Good Proxy v{__version__}", icon="msg_info"),
-            ])
+            rows.append(Header(text="Справка и диагностика"))
+            rows.append(Text(
+                text="Инструкция",
+                subtext="Пошаговое описание всех функций и кнопок плагина.",
+                icon="msg_info",
+                on_click=self._on_show_guide_click,
+            ))
+            rows.append(Text(
+                text="Пинг источников",
+                subtext="Проверка доступности репозиториев и зеркал.",
+                icon="msg_link",
+                on_click=self._on_test_sources_click,
+            ))
+            rows.append(Text(
+                text="Проверить обновление плагина",
+                subtext=f"Текущая версия Good Proxy: v{__version__}",
+                icon="msg_retry",
+                on_click=self._on_check_update_click,
+            ))
         except Exception as e:
-            _log(f"create_settings Text rows error: {e}")
-            # Keep at least a visible page even if this SDK lacks Text rows.
-            try:
-                rows.append(Header(text=f"Good Proxy v{__version__}"))
-            except Exception:
-                pass
+            _log(f"create_settings help section error: {e}")
+
         return rows
 
     def _on_check_update_click(self, _view=None):
@@ -1801,40 +1723,109 @@ class ProxyManagerPlugin(BasePlugin):
         brief = f"Пинг: {reachable}/{len(PROXIES_URLS)} источника доступны.\n" + " · ".join(compact_results)
         _notify("info", brief)
 
-    def _on_clear_cache_click(self, _view=None):
-        self._speed_cache = {}
-        try:
-            self.set_setting("speed_cache", "{}")
-        except Exception:
-            pass
-        _notify("success", "Кэш скоростей прокси очищен.")
+    def _on_generate_speed_file_click(self, _view=None):
+        _notify("info", "Генерирую тестовый файл...")
+        run_on_queue(self._do_generate_speed_file, PLUGINS_QUEUE)
 
-    def _load_speed_cache(self):
+    def _do_generate_speed_file(self):
         try:
-            raw = self.get_setting("speed_cache", "{}")
-            if raw and isinstance(raw, str):
-                self._speed_cache = json.loads(raw)
-                return
-            if isinstance(raw, dict):
-                self._speed_cache = raw
-                return
-        except Exception:
-            pass
-        self._speed_cache = {}
+            size_idx = int(self.get_setting("speed_test_chunks", 2))
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            labels = ["2 МБ", "5 МБ", "10 МБ"]
+            if size_idx < 0 or size_idx >= len(sizes):
+                size_idx = 2
+            target_size = sizes[size_idx]
+            label = labels[size_idx]
 
-    def _save_speed_cache(self):
-        try:
-            self.set_setting("speed_cache", json.dumps(self._speed_cache))
+            ApplicationLoader = jclass("org.telegram.messenger.ApplicationLoader")
+            cache_dir = ApplicationLoader.applicationContext.getCacheDir().getAbsolutePath()
+            # Файл создается БЕЗ расширения
+            file_path = os.path.join(cache_dir, "speed_test_asset")
+
+            chunk = b"\x00" * (64 * 1024)
+            with open(file_path, "wb") as f:
+                written = 0
+                while written < target_size:
+                    to_write = min(len(chunk), target_size - written)
+                    f.write(chunk[:to_write])
+                    written += to_write
+
+            from client_utils import send_document, get_user_config
+            peer_id = get_user_config().getClientUserId()
+            caption = f"Good Proxy — тестовый файл ({label})"
+            send_document(peer_id, file_path, caption=caption)
+
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+
+            self.set_setting("speed_test_message_id", "")
+            time.sleep(1.2)
+            found_id = self._find_speed_test_message_in_saved(target_size)
+            if found_id > 0:
+                self.set_setting("speed_test_message_id", str(found_id))
+                run_on_ui_thread(lambda: BulletinHelper.show_success(f"Тестовый файл ({label}) создан и отправлен в «Избранное»!"))
+            else:
+                run_on_ui_thread(lambda: BulletinHelper.show_success(f"Тестовый файл ({label}) отправлен в «Избранное»."))
         except Exception as e:
-            _log(f"save speed cache error: {e}")
+            _log(f"generate speed file error: {e}")
+            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Ошибка создания файла: {e}"))
 
-    def _get_proxy_speed(self, host, port):
-        if not hasattr(self, "_speed_cache") or self._speed_cache is None:
-            self._load_speed_cache()
-        sp = self._speed_cache.get(f"{host}:{port}")
-        if sp:
-            return sp
-        return self._speed_cache.get(str(host), "")
+    def _find_speed_test_message_in_saved(self, expected_size=0):
+        try:
+            UserConfig = jclass("org.telegram.messenger.UserConfig")
+            ConnectionsManager = jclass("org.telegram.tgnet.ConnectionsManager")
+            RequestDelegate = jclass("org.telegram.tgnet.RequestDelegate")
+            cm = ConnectionsManager.getInstance(UserConfig.selectedAccount)
+
+            req = TLRPC.TL_messages_getHistory()
+            req.peer = TLRPC.TL_inputPeerSelf()
+            req.offset_id = 0
+            req.offset_date = 0
+            req.add_offset = 0
+            req.limit = 20
+            req.max_id = 0
+            req.min_id = 0
+            req.hash = 0
+
+            result = {"msg_id": 0}
+            done = threading.Event()
+
+            class HistoryDelegate(dynamic_proxy(RequestDelegate)):
+                def run(_delegate, response, error):
+                    if response is not None:
+                        msgs = getattr(response, "messages", None)
+                        if msgs is not None:
+                            try:
+                                n = int(msgs.size())
+                                items = [msgs.get(i) for i in range(n)]
+                            except Exception:
+                                items = list(msgs)
+                            for m in items:
+                                media = getattr(m, "media", None)
+                                doc = getattr(media, "document", None) if media else None
+                                if doc is not None:
+                                    doc_size = int(getattr(doc, "size", 0) or 0)
+                                    msg_text = str(getattr(m, "message", "") or "")
+                                    is_match = (
+                                        "Good Proxy" in msg_text
+                                        or "speed_test_asset" in msg_text
+                                        or (expected_size > 0 and abs(doc_size - expected_size) < 4096)
+                                    )
+                                    if is_match:
+                                        result["msg_id"] = int(getattr(m, "id", 0) or 0)
+                                        break
+                    done.set()
+
+            delegate = HistoryDelegate()
+            cm.sendRequest(req, delegate, 2)
+            done.wait(timeout=6.0)
+            return result["msg_id"]
+        except Exception as e:
+            _log(f"_find_speed_test_message_in_saved error: {e}")
+            return 0
 
     def _speed_name_updates_enabled(self):
         try:
@@ -1907,7 +1898,7 @@ class ProxyManagerPlugin(BasePlugin):
         if self._get_speed_test_message_id() <= 0:
             return _notify(
                 "error",
-                "Тест не запущен: укажите ID/ссылку сообщения с документом в «Избранном» в настройках Good Proxy.",
+                "Тестовый файл не найден. Перейдите в настройки Good Proxy и нажмите «Сгенерировать файл для теста скорости».",
             )
         self._bulk_speed_busy = True
         _notify("info", "Читаю встроенные результаты проверки ExteraGram…")
@@ -2110,13 +2101,13 @@ class ProxyManagerPlugin(BasePlugin):
             statuses, checking_keys = self._collect_builtin_proxy_statuses(SC, controller_list)
 
             try:
-                size_index = int(self.get_setting("speed_test_all_chunks", 0))
+                size_index = int(self.get_setting("speed_test_chunks", 2))
             except Exception:
-                size_index = 0
-            sizes = [512 * 1024, 1024 * 1024, 2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
-            size_labels = ["512 КБ", "1 МБ", "2 МБ", "5 МБ", "10 МБ"]
+                size_index = 2
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            size_labels = ["2 МБ", "5 МБ", "10 МБ"]
             if size_index < 0 or size_index >= len(sizes):
-                size_index = 0
+                size_index = 2
 
             records = []
             skipped_lines = []
@@ -2681,13 +2672,7 @@ class ProxyManagerPlugin(BasePlugin):
                                 name_updates += 1
                             else:
                                 name_update_failures += 1
-                        try:
-                            if not hasattr(self, "_speed_cache") or self._speed_cache is None:
-                                self._speed_cache = {}
-                            self._speed_cache[f"{record['host']}:{record['port']}"] = speed_text
-                            self._speed_cache[record["host"]] = speed_text
-                        except Exception:
-                            pass
+                        pass
                     tested += 1
                 except Exception as e:
                     errors += 1
@@ -2747,8 +2732,6 @@ class ProxyManagerPlugin(BasePlugin):
             try:
                 self._bulk_speed_busy = False
                 self._bulk_speed_state = None
-                if self._speed_cache:
-                    run_on_queue(self._save_speed_cache, PLUGINS_QUEUE)
             except Exception:
                 pass
 
@@ -2848,22 +2831,35 @@ class ProxyManagerPlugin(BasePlugin):
                 "Тест не запущен: отправьте файл-документ в «Избранное» и укажите ID/ссылку на него в настройках Good Proxy.",
             )
         try:
-            chunks_idx = int(self.get_setting("speed_test_chunks", 1))
+            chunks_idx = int(self.get_setting("speed_test_chunks", 2))
         except Exception:
-            chunks_idx = 1
-        sizes = [512 * 1024, 1024 * 1024, 2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
-        labels = ["512 КБ", "1 МБ", "2 МБ", "5 МБ", "10 МБ"]
+            chunks_idx = 2
+        sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+        labels = ["2 МБ", "5 МБ", "10 МБ"]
         if chunks_idx < 0 or chunks_idx >= len(sizes):
-            chunks_idx = 1
+            chunks_idx = 2
         _notify("info", f"Скачиваю тестовый файл через Telegram ({labels[chunks_idx]})…")
         run_on_queue(self._do_check_current_speed, PLUGINS_QUEUE)
 
     def _get_speed_test_message_id(self):
         try:
             raw = self.get_setting("speed_test_message_id", "")
+            mid = _parse_speed_message_id(raw)
+            if mid > 0:
+                return mid
         except Exception:
-            raw = ""
-        return _parse_speed_message_id(raw)
+            pass
+        try:
+            size_idx = int(self.get_setting("speed_test_chunks", 2))
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            expected = sizes[size_idx] if 0 <= size_idx < len(sizes) else 10 * 1024 * 1024
+            found_id = self._find_speed_test_message_in_saved(expected)
+            if found_id > 0:
+                self.set_setting("speed_test_message_id", str(found_id))
+                return found_id
+        except Exception as e:
+            _log(f"auto discover speed test message failed: {e}")
+        return 0
 
     def _speed_context_is_active(self, ctx):
         try:
@@ -2896,7 +2892,10 @@ class ProxyManagerPlugin(BasePlugin):
                     return _notify("info", "Тест скорости уже выполняется.")
             message_id = self._get_speed_test_message_id()
             if message_id <= 0:
-                return _notify("error", "Тест не запущен: укажите ID/ссылку сообщения с файлом в настройках Good Proxy.")
+                return _notify(
+                    "error",
+                    "Тестовый файл не найден. Перейдите в настройки Good Proxy и нажмите «Сгенерировать файл для теста скорости».",
+                )
 
             SC = _shared_config()
             is_enabled = getattr(SC, "proxyEnabled", False) or (
@@ -2925,13 +2924,13 @@ class ProxyManagerPlugin(BasePlugin):
             proxy_settings = _proxy_settings_for_item(cp, host, port, _secret, _proxy_type)
 
             try:
-                chunks_idx = int(self.get_setting("speed_test_chunks", 1))
+                chunks_idx = int(self.get_setting("speed_test_chunks", 2))
             except Exception:
-                chunks_idx = 1
-            sizes = [512 * 1024, 1024 * 1024, 2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
-            labels = ["512 КБ", "1 МБ", "2 МБ", "5 МБ", "10 МБ"]
+                chunks_idx = 2
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            labels = ["2 МБ", "5 МБ", "10 МБ"]
             if chunks_idx < 0 or chunks_idx >= len(sizes):
-                chunks_idx = 1
+                chunks_idx = 2
 
             UserConfig = jclass("org.telegram.messenger.UserConfig")
             ConnectionsManager = jclass("org.telegram.tgnet.ConnectionsManager")
@@ -3281,14 +3280,6 @@ class ProxyManagerPlugin(BasePlugin):
             elif name_updated is False and self._speed_name_updates_enabled():
                 result_lines.append("Не удалось обновить встроенное название прокси.")
             result = "\n".join(result_lines)
-            try:
-                if not hasattr(self, "_speed_cache") or self._speed_cache is None:
-                    self._speed_cache = {}
-                self._speed_cache[f"{host}:{port}"] = speed_text
-                self._speed_cache[host] = speed_text
-                run_on_queue(self._save_speed_cache, PLUGINS_QUEUE)
-            except Exception as e:
-                _log(f"save measured speed failed: {type(e).__name__}")
             _send_saved_log(result)
             toast = f"{display_host}: {speed_text}. Результат и ссылка — в «Избранном»."
             if name_updated is True:
@@ -3898,7 +3889,7 @@ class ProxyManagerPlugin(BasePlugin):
             return _report_error("Не удалось загрузить прокси.\n" + details)
 
         if tier_filter in (1, 2, 3):
-            filtered = {k: p for k, p in parsed.items() if p.get("tier") == tier_filter}
+            filtered = [p for p in parsed if p.get("tier") == tier_filter]
             if not filtered:
                 return _report_error(f"В источнике не найдено прокси с категорией Tier {tier_filter}.")
             parsed = filtered
@@ -3943,27 +3934,19 @@ class ProxyManagerPlugin(BasePlugin):
                 f"В этой версии клиента не найден SharedConfig.ProxyInfo: {str(e)[:160]}"
             )
 
-        added = duplicates = failed = 0
+        added = failed = 0
         first_add_error = ""
         add_api_used = False
         controller_api_used = False
         direct_list_add_used = False
-        for key, proxy in parsed.items():
-            if proxy.get("speed"):
-                self._speed_cache[f"{proxy['host']}:{proxy['port']}"] = proxy["speed"]
-                self._speed_cache[proxy["host"]] = proxy["speed"]
-
-            if key in existing:
-                duplicates += 1
-                continue
-
+        for proxy in parsed:
             try:
                 info = _make_proxy_info(ProxyInfo, proxy)
             except Exception as e:
                 failed += 1
                 if not first_add_error:
                     first_add_error = f"ProxyInfo: {type(e).__name__}: {e}"
-                _log(f"ProxyInfo constructor failed for {key}: {e}")
+                _log(f"ProxyInfo constructor failed for {proxy.get('host')}: {e}")
                 continue
 
             before_size = _proxy_list_size(proxy_list)
@@ -4038,8 +4021,6 @@ class ProxyManagerPlugin(BasePlugin):
         except Exception:
             controller_count = None
 
-        self._save_speed_cache()
-
         save_error = shared_sync_save_error
         if added:
             source_save_error = _persist_proxy_list(
@@ -4060,7 +4041,7 @@ class ProxyManagerPlugin(BasePlugin):
         tier_tag = f" [Tier {tier_filter}]" if tier_filter in (1, 2, 3) else ""
         summary = (
             f"Источник: {host}{tier_tag}. Отобрано: {len(parsed)}. "
-            f"Добавлено из источника: {added}. Уже в ProxyController: {duplicates}."
+            f"Добавлено в клиент: {added}."
         )
         if failed:
             summary += f" Не удалось добавить из источника: {failed}."
@@ -4115,7 +4096,7 @@ class ProxyManagerPlugin(BasePlugin):
 
             lines = []
             for p in sorted(proxies, key=sort_key):
-                speed = self._get_proxy_speed(p['host'], p['port'])
+                speed = p.get('speed', '')
                 speed_tag = f"#?{speed.replace(' ', '')}" if speed else ""
                 lines.append(f"tg://proxy?server={p['host']}&port={p['port']}&secret={p['secret']}{speed_tag}")
 
