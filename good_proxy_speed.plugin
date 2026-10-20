@@ -21,16 +21,16 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
 
 PLUGIN_UPDATE_URLS = [
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
     "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
-    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
-    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
 ]
 
 
