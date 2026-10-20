@@ -1,2 +1,19 @@
 # good_proxies
-Public verified MTProto proxies list for Telegram plugin
+Public verified MTProto proxies and plugins for Telegram / exteraGram.
+
+## Плагины
+
+### 1. [good_proxy.plugin](good_proxy.plugin) (v2.0.0)
+Основной плагин для работы с прокси:
+- Автоматический сбор и обновление пула MTProto-прокси из репозиториев GitHub и GitVerse.
+- Автоматическое скрытие спонсорских каналов на сетевом уровне (`checkPromoInfo`).
+- Нативная фоновая MTProto-проверка и удаление нерабочих/медленных узлов.
+- Экспорт рабочего пула в буфер обмена.
+
+### 2. [good_proxy_speed.plugin](good_proxy_speed.plugin) (v1.0.0)
+Плагин для измерения скорости:
+- Одиночный замер скорости текущего активного прокси через Telegram MTProto API.
+- Пакетный замер скорости по списку серверов.
+- Технология **TCP Window Warmup**: отбрасывание стартового чанка для раскрытия окна TCP без влияния задержки RTT.
+- Автоматическая генерация тестового файла (`speed_test_asset`) нужного размера (2, 5, 10 МБ) в «Избранное».
+- Запись замеренной скорости прямо в имя прокси.

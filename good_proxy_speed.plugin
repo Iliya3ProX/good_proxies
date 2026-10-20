@@ -1,0 +1,1030 @@
+import os
+import re
+import sys
+import threading
+import time
+import urllib.request
+from urllib.parse import parse_qs, urlparse
+
+from android.content import Intent
+from android.net import Uri
+from android_utils import log as _android_log, run_on_ui_thread
+from base_plugin import BasePlugin, MenuItemData, MenuItemType, MethodHook
+from client_utils import PLUGINS_QUEUE, get_last_fragment, get_user_config, run_on_queue, send_document
+from hook_utils import find_class, get_private_field, set_private_field
+from java import dynamic_proxy, jclass
+from java.lang import Boolean as JBoolean, Integer
+from org.telegram.tgnet import TLRPC
+from ui.bulletin import BulletinHelper
+
+__id__ = "good_proxy_speed"
+__name__ = "Good Proxy Speed"
+__description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
+__author__ = "@MouXoziain & Gemini"
+__version__ = "1.0.0"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.4.3"
+__icon__ = "msg2_speed"
+
+PLUGIN_UPDATE_URLS = [
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
+]
+
+
+def _parse_semver(v_str):
+    parts = []
+    for part in re.split(r"[^\d]+", str(v_str or "").strip()):
+        if part.isdigit():
+            parts.append(int(part))
+    return tuple(parts) or (0, 0, 0)
+
+
+
+def _log(msg):
+    _android_log(f"[GoodProxySpeed] {msg}")
+
+
+def _shared_config():
+    return jclass("org.telegram.messenger.SharedConfig")
+
+
+def _get_proxy_controller():
+    for name in (
+        "com.exteragram.messenger.proxy.ProxyController",
+        "org.telegram.messenger.ProxyController",
+    ):
+        try:
+            cls = jclass(name)
+            inst = getattr(cls, "getInstance", None)
+            if callable(inst):
+                return inst()
+        except Exception:
+            continue
+    return None
+
+
+def _get_proxy_list(SC, proxy_controller=None):
+    if proxy_controller is not None:
+        try:
+            getter = getattr(proxy_controller, "getProxyList", None)
+            if callable(getter):
+                res = getter()
+                if res is not None:
+                    return res
+        except Exception:
+            pass
+    try:
+        return getattr(SC, "proxyList", None) or get_private_field(SC, "proxyList")
+    except Exception:
+        return None
+
+
+def _proxy_list_size(proxy_list):
+    if proxy_list is None:
+        return None
+    try:
+        size_fn = getattr(proxy_list, "size", None)
+        if callable(size_fn):
+            return int(size_fn())
+    except Exception:
+        pass
+    try:
+        return len(proxy_list)
+    except Exception:
+        return None
+
+
+def _proxy_list_item(proxy_list, index):
+    try:
+        get_fn = getattr(proxy_list, "get", None)
+        if callable(get_fn):
+            return get_fn(int(index))
+    except Exception:
+        pass
+    try:
+        return proxy_list[int(index)]
+    except Exception:
+        return None
+
+
+def _notify(kind, text):
+    msg = str(text or "")
+    if kind == "error":
+        BulletinHelper.show_error(msg)
+    elif kind == "success":
+        BulletinHelper.show_success(msg)
+    else:
+        BulletinHelper.show_info(msg)
+
+
+def _show_modal_alert(title, message, button_text="Понятно"):
+    def _show():
+        try:
+            from ui.alert import AlertDialogBuilder
+            fragment = get_last_fragment()
+            context = fragment.getParentActivity() if fragment is not None else None
+            if context is None:
+                raise RuntimeError("Activity unavailable")
+            builder = AlertDialogBuilder(context)
+            builder.set_title(str(title))
+            builder.set_message(str(message))
+            builder.set_positive_button(str(button_text), lambda d, _w: d.dismiss())
+            builder.show()
+        except Exception:
+            _notify("info", f"{title}\n\n{message}")
+    run_on_ui_thread(_show)
+
+
+def _format_speed_mbps(total_bytes, elapsed):
+    seconds = max(0.001, float(elapsed or 0.001))
+    speed_mbps = max(0.0, float(total_bytes or 0)) / seconds / 1_000_000.0
+    if speed_mbps < 1.0:
+        label = f"{speed_mbps:.1f} МБ/с"
+    else:
+        label = f"{speed_mbps:.2f} МБ/с"
+    return speed_mbps, label
+
+
+_PROXY_SPEED_NAME_PREFIX_RE = re.compile(r"^\s*\d+(?:[.,]\d+)?\s*МБ/с\s*[·|—-]\s*", re.IGNORECASE)
+_PROXY_SPEED_NAME_ONLY_RE = re.compile(r"^\s*\d+(?:[.,]\d+)?\s*МБ/с\s*$", re.IGNORECASE)
+
+
+def _proxy_speed_name_text(current_name, display_name, host, port, speed_text):
+    base_name = ""
+    for candidate in (current_name, display_name):
+        base = str(candidate or "").strip()
+        base = _PROXY_SPEED_NAME_PREFIX_RE.sub("", base, count=1).strip()
+        if base and not _PROXY_SPEED_NAME_ONLY_RE.fullmatch(base):
+            base_name = base
+            break
+    if not base_name:
+        safe_host = str(host or "").strip()
+        try:
+            port_value = int(port or 0)
+        except Exception:
+            port_value = 0
+        base_name = f"{safe_host}:{port_value}" if safe_host and port_value > 0 else safe_host
+    speed = str(speed_text or "").strip()
+    return f"{speed} · {base_name}" if speed and base_name else speed or base_name
+
+
+def _parse_speed_message_id(value):
+    text = str(value or "").strip()
+    try:
+        query = parse_qs(urlparse(text).query)
+        for name in ("message_id", "msg_id"):
+            for candidate in query.get(name, []):
+                if str(candidate).strip().isdigit() and int(candidate) > 0:
+                    return int(candidate)
+    except Exception:
+        pass
+    path = text.split("?", 1)[0].rstrip("/")
+    match = re.search(r"(\d+)\s*$", path)
+    if not match:
+        return 0
+    try:
+        result = int(match.group(1))
+        return result if result > 0 else 0
+    except Exception:
+        return 0
+
+
+def _speed_file_chunks(requested_bytes, file_size, chunk_bytes=512 * 1024):
+    try:
+        target = min(max(0, int(requested_bytes)), max(0, int(file_size)))
+        chunk = max(1, int(chunk_bytes))
+    except Exception:
+        return 0, []
+    return target, list(range(0, target, chunk))
+
+
+def _proxy_key(host, port, secret="", proxy_type="mtproto"):
+    p_type = str(proxy_type or "mtproto").lower()
+    if p_type == "web" or int(port or 0) == 0:
+        return f"web:{str(host or '').strip().lower()}:{str(secret or '').strip()}"
+    return f"mtproto:{str(host or '').strip().lower()}:{int(port)}:{str(secret or '').strip()}"
+
+
+def _proxy_item_values(item):
+    if item is None:
+        return "", 0, "", ""
+    settings = None
+    try:
+        settings = get_private_field(item, "settings") or getattr(item, "settings", None)
+    except Exception:
+        pass
+
+    def get_val(method_name, field_name, default=""):
+        target = settings if settings is not None else item
+        try:
+            m = getattr(target, method_name, None)
+            if callable(m):
+                return m()
+        except Exception:
+            pass
+        try:
+            val = getattr(target, field_name, None)
+            if val is not None:
+                return val
+        except Exception:
+            pass
+        try:
+            val = get_private_field(target, field_name)
+            if val is not None:
+                return val
+        except Exception:
+            pass
+        return default
+
+    try:
+        p_type = str(get_val("getType", "type", "") or "").split(".")[-1].upper()
+        addr = str(get_val("getAddress", "address", "") or "").strip()
+        port = int(get_val("getPort", "port", 0) or 0)
+        secret = str(get_val("getSecret", "secret", "") or "").strip()
+        return addr, port, secret, p_type
+    except Exception:
+        return "", 0, "", ""
+
+
+def _proxy_settings_for_item(item, host, port, secret, proxy_type):
+    try:
+        settings = get_private_field(item, "settings") or getattr(item, "settings", None)
+        if settings is not None:
+            return settings
+    except Exception:
+        pass
+    type_name = str(proxy_type or "").split(".")[-1].upper()
+    if type_name not in ("MTPROTO", "SOCKS5", "WEB"):
+        type_name = "MTPROTO" if str(secret or "").strip() else "SOCKS5"
+    try:
+        ProxySettings = jclass("org.telegram.utils.proxy.ProxySettings")
+        ProxyType = jclass("org.telegram.utils.proxy.ProxySettings$Type")
+        builder = ProxySettings.builder()
+        builder.setType(getattr(ProxyType, type_name))
+        builder.setAddress(str(host))
+        builder.setPort(int(port))
+        if type_name in ("MTPROTO", "WEB"):
+            builder.setSecret(str(secret or ""))
+        return builder.build()
+    except Exception:
+        return None
+
+
+def _proxy_settings_fields(settings):
+    if settings is None:
+        return None
+    try:
+        p_type = str(getattr(settings, "getType", lambda: "")() or "").split(".")[-1].upper()
+        addr = str(getattr(settings, "getAddress", lambda: "")() or "").strip()
+        port = int(getattr(settings, "getPort", lambda: 0)() or 0)
+        secret = str(getattr(settings, "getSecret", lambda: "")() or "").strip()
+        return {"type": p_type, "address": addr, "port": port, "secret": secret}
+    except Exception:
+        return None
+
+
+class GoodProxySpeedPlugin(BasePlugin):
+    def on_plugin_load(self):
+        try:
+            self._speed_context = None
+            self._bulk_speed_busy = False
+            self._bulk_speed_state = None
+            plugin = self
+
+            _log(f"Plugin v{__version__} loading...")
+
+            # Меню: Скорость текущего прокси
+            try:
+                self.add_menu_item(MenuItemData(
+                    menu_type=MenuItemType.MAIN_MENU,
+                    text="Скорость текущего прокси",
+                    on_click=self._on_check_current_proxy_speed,
+                    icon="msg2_speed",
+                    priority=100,
+                ))
+            except Exception as e:
+                _log(f"add MAIN_MENU error: {e}")
+
+            try:
+                self.add_menu_item(MenuItemData(
+                    menu_type=MenuItemType.DRAWER_MENU,
+                    text="Скорость текущего прокси",
+                    on_click=self._on_check_current_proxy_speed,
+                    icon="msg2_speed",
+                    priority=100,
+                ))
+            except Exception as e:
+                _log(f"add DRAWER_MENU error: {e}")
+
+            _log(f"Plugin v{__version__} loaded successfully")
+            self._check_plugin_update(manual=False)
+        except Exception as e:
+            _log(f"on_plugin_load error: {e}")
+
+    def create_settings(self) -> list:
+        try:
+            from ui.settings import Header, Selector, Switch, Text
+        except Exception as e:
+            _log(f"create_settings unavailable: {e}")
+            return []
+
+        rows = [Header(text="Good Proxy Speed — настройки")]
+
+        try:
+            rows.append(Header(text="Параметры замера скорости"))
+            rows.append(Selector(
+                key="speed_test_chunks",
+                text="Размер тестового файла",
+                default=2,
+                items=["2 МБ", "5 МБ", "10 МБ"],
+                subtext="Объём реальных данных, скачиваемых из Telegram при замере скорости.",
+                icon="msg2_speed",
+            ))
+            rows.append(Text(
+                text="Сгенерировать файл для теста скорости",
+                subtext="Создаст файл без расширения и отправит его в «Избранное».",
+                icon="msg_download",
+                on_click=self._on_generate_speed_file_click,
+            ))
+            rows.append(Switch(
+                key="speed_test_set_proxy_name",
+                text="Записывать скорость в название",
+                default=True,
+                subtext="Добавляет замеренную скорость прямо в имя прокси в клиенте.",
+                icon="msg_edit",
+            ))
+            rows.append(Switch(
+                key="auto_update_plugin",
+                text="Автообновление плагина",
+                default=True,
+                subtext="Проверять обновления плагина на GitHub при старте.",
+                icon="msg_retry",
+            ))
+            rows.append(Header(text="Действия"))
+            rows.append(Text(
+                text="Проверить скорость всех прокси",
+                subtext="Запустить пакетный замер доступных серверов.",
+                icon="msg2_speed",
+                on_click=self._on_check_all_proxy_speeds_click,
+            ))
+            rows.append(Text(
+                text="Скорость текущего прокси",
+                subtext="Запустить замер активного прокси-соединения.",
+                icon="msg2_speed",
+                on_click=self._on_check_current_proxy_speed,
+            ))
+            rows.append(Header(text="Справка и диагностика"))
+            rows.append(Text(
+                text="Инструкция",
+                subtext="Как работает замер скорости и TCP Window Warmup.",
+                icon="msg_info",
+                on_click=self._on_show_guide_click,
+            ))
+            rows.append(Text(
+                text="Проверить обновление плагина",
+                subtext=f"Текущая версия Good Proxy Speed: v{__version__}",
+                icon="msg_retry",
+                on_click=self._on_check_update_click,
+            ))
+        except Exception as e:
+            _log(f"create_settings error: {e}")
+
+        return rows
+
+    def _on_check_update_click(self, _view=None):
+        _notify("info", "Проверяем наличие обновлений Good Proxy Speed…")
+        self._check_plugin_update(manual=True)
+
+    def _check_plugin_update(self, manual=False):
+        """Проверяет наличие новой версии плагина на GitHub и обновляет файл."""
+        if not manual:
+            try:
+                enabled = self.get_setting("auto_update_plugin", True)
+                if isinstance(enabled, str):
+                    enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "")
+                else:
+                    enabled = bool(enabled)
+            except Exception:
+                enabled = True
+            if not enabled:
+                return
+
+        def task():
+            remote_bytes = None
+            remote_version = None
+            errors = []
+            for base_url in PLUGIN_UPDATE_URLS:
+                host = urlparse(base_url).hostname or base_url
+                sep = "&" if "?" in base_url else "?"
+                url = f"{base_url}{sep}t={int(time.time())}"
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "User-Agent": f"GoodProxySpeed/{__version__} (Android Updater)",
+                            "Cache-Control": "no-cache",
+                            "Pragma": "no-cache",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        code = resp.getcode()
+                        if code == 200:
+                            data = resp.read(2 * 1024 * 1024)
+                            header_sample = data[:3000].decode("utf-8", errors="ignore")
+                            m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
+                            if m:
+                                remote_version = m.group(1).strip()
+                                remote_bytes = data
+                                break
+                            else:
+                                errors.append(f"{host}: версия не распознана")
+                        else:
+                            errors.append(f"{host}: HTTP {code}")
+                except Exception as e:
+                    err_msg = f"{type(e).__name__}: {str(e)[:80]}"
+                    errors.append(f"{host}: {err_msg}")
+                    _log(f"Check update mirror {url} failed: {e}")
+                    continue
+
+            if not remote_bytes or not remote_version:
+                if manual:
+                    details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
+                    _notify("error", f"Не удалось проверить обновления Good Proxy Speed:\n{details}")
+                return
+
+            if _parse_semver(remote_version) > _parse_semver(__version__):
+                try:
+                    from file_utils import get_plugins_dir
+                    pdir = str(get_plugins_dir())
+                    plugin_file = os.path.join(pdir, "good_proxy_speed.plugin")
+                    with open(plugin_file, "wb") as f:
+                        f.write(remote_bytes)
+                    _log(f"Good Proxy Speed successfully updated to v{remote_version}")
+                    _notify("success", f"Плагин Good Proxy Speed обновлен до v{remote_version}!\nПерезапустите Telegram для применения изменений.")
+                except Exception as e:
+                    _log(f"Failed to write updated plugin file: {e}")
+                    if manual:
+                        _notify("error", f"Сбой записи файла плагина: {e}")
+            else:
+                if manual:
+                    _notify("info", f"У вас установлена последняя версия Good Proxy Speed (v{__version__}).")
+
+        run_on_queue(task, PLUGINS_QUEUE)
+
+    def _on_show_guide_click(self, _view=None):
+        guide = (
+            "Good Proxy Speed — замер реальной скорости:\n\n"
+            "1. Подготовка:\n"
+            "Нажмите «Сгенерировать файл для теста скорости». Плагин создаст бинарный файл без расширения "
+            "и отправит его в ваше «Избранное». ID файла привяжется автоматически.\n\n"
+            "2. Замер:\n"
+            "• Кнопка «Скорость текущего прокси» замеряет активное соединение.\n"
+            "• Кнопка «Проверить скорость всех прокси» выполняет пакетный тест всех доступных прокси.\n\n"
+            "3. Технология TCP Window Warmup:\n"
+            "Первый чанк (512 КБ) скачивается для прогрева соединения и раскрытия окна перегрузки TCP (cwnd). "
+            "Секундомер включается со второго чанка, обеспечивая чистый и точный замер без ограничений RTT."
+        )
+        run_on_ui_thread(lambda: _show_modal_alert("Инструкция Good Proxy Speed", guide, "Понятно"))
+
+    def _on_generate_speed_file_click(self, _view=None):
+        _notify("info", "Генерирую тестовый файл...")
+        run_on_queue(self._do_generate_speed_file, PLUGINS_QUEUE)
+
+    def _do_generate_speed_file(self):
+        try:
+            size_idx = int(self.get_setting("speed_test_chunks", 2))
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            labels = ["2 МБ", "5 МБ", "10 МБ"]
+            if size_idx < 0 or size_idx >= len(sizes):
+                size_idx = 2
+            target_size = sizes[size_idx]
+            label = labels[size_idx]
+
+            ApplicationLoader = jclass("org.telegram.messenger.ApplicationLoader")
+            cache_dir = ApplicationLoader.applicationContext.getCacheDir().getAbsolutePath()
+            file_path = os.path.join(cache_dir, "speed_test_asset")
+
+            chunk = b"\x00" * (64 * 1024)
+            with open(file_path, "wb") as f:
+                written = 0
+                while written < target_size:
+                    to_write = min(len(chunk), target_size - written)
+                    f.write(chunk[:to_write])
+                    written += to_write
+
+            peer_id = get_user_config().getClientUserId()
+            caption = f"Good Proxy — тестовый файл ({label})"
+            send_document(peer_id, file_path, caption=caption)
+
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+
+            self.set_setting("speed_test_message_id", "")
+            time.sleep(1.2)
+            found_id = self._find_speed_test_message_in_saved(target_size)
+            if found_id > 0:
+                self.set_setting("speed_test_message_id", str(found_id))
+                run_on_ui_thread(lambda: BulletinHelper.show_success(f"Тестовый файл ({label}) создан и отправлен в «Избранное»!"))
+            else:
+                run_on_ui_thread(lambda: BulletinHelper.show_success(f"Тестовый файл ({label}) отправлен в «Избранное»."))
+        except Exception as e:
+            _log(f"generate speed file error: {e}")
+            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Ошибка создания файла: {e}"))
+
+    def _find_speed_test_message_in_saved(self, expected_size=0):
+        try:
+            UserConfig = jclass("org.telegram.messenger.UserConfig")
+            ConnectionsManager = jclass("org.telegram.tgnet.ConnectionsManager")
+            RequestDelegate = jclass("org.telegram.tgnet.RequestDelegate")
+            cm = ConnectionsManager.getInstance(UserConfig.selectedAccount)
+
+            req = TLRPC.TL_messages_getHistory()
+            req.peer = TLRPC.TL_inputPeerSelf()
+            req.offset_id = 0
+            req.offset_date = 0
+            req.add_offset = 0
+            req.limit = 20
+            req.max_id = 0
+            req.min_id = 0
+            req.hash = 0
+
+            result = {"msg_id": 0}
+            done = threading.Event()
+
+            class HistoryDelegate(dynamic_proxy(RequestDelegate)):
+                def run(_delegate, response, error):
+                    if response is not None:
+                        msgs = getattr(response, "messages", None)
+                        if msgs is not None:
+                            try:
+                                n = int(msgs.size())
+                                items = [msgs.get(i) for i in range(n)]
+                            except Exception:
+                                items = list(msgs)
+                            for m in items:
+                                media = getattr(m, "media", None)
+                                doc = getattr(media, "document", None) if media else None
+                                if doc is not None:
+                                    doc_size = int(getattr(doc, "size", 0) or 0)
+                                    msg_text = str(getattr(m, "message", "") or "")
+                                    is_match = (
+                                        "Good Proxy" in msg_text
+                                        or "speed_test_asset" in msg_text
+                                        or (expected_size > 0 and abs(doc_size - expected_size) < 4096)
+                                    )
+                                    if is_match:
+                                        result["msg_id"] = int(getattr(m, "id", 0) or 0)
+                                        break
+                    done.set()
+
+            delegate = HistoryDelegate()
+            cm.sendRequest(req, delegate, 2)
+            done.wait(timeout=6.0)
+            return result["msg_id"]
+        except Exception as e:
+            _log(f"_find_speed_test_message_in_saved error: {e}")
+            return 0
+
+    def _get_speed_test_message_id(self):
+        try:
+            raw = self.get_setting("speed_test_message_id", "")
+            mid = _parse_speed_message_id(raw)
+            if mid > 0:
+                return mid
+        except Exception:
+            pass
+        try:
+            size_idx = int(self.get_setting("speed_test_chunks", 2))
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            expected = sizes[size_idx] if 0 <= size_idx < len(sizes) else 10 * 1024 * 1024
+            found_id = self._find_speed_test_message_in_saved(expected)
+            if found_id > 0:
+                self.set_setting("speed_test_message_id", str(found_id))
+                return found_id
+        except Exception as e:
+            _log(f"auto discover speed test message failed: {e}")
+        return 0
+
+    def _speed_name_updates_enabled(self):
+        try:
+            val = self.get_setting("speed_test_set_proxy_name", True)
+            if isinstance(val, str):
+                return val.strip().lower() not in ("", "0", "false", "no")
+            return bool(val)
+        except Exception:
+            return True
+
+    def _set_native_proxy_speed_name(self, record, speed_text):
+        if not self._speed_name_updates_enabled():
+            return None
+        try:
+            controller = _get_proxy_controller()
+            item = record.get("item")
+            if controller is None or item is None:
+                return False
+            current_name = getattr(item, "title", None) or get_private_field(item, "title") or ""
+            target_name = _proxy_speed_name_text(
+                current_name, record.get("display_host", ""), record.get("host", ""), record.get("port", 0), speed_text
+            )
+            for m_name in ("setProxyName", "setProxyTitle", "renameProxy"):
+                method = getattr(controller, m_name, None)
+                if callable(method):
+                    try:
+                        method(item, target_name)
+                        return True
+                    except Exception:
+                        pass
+            try:
+                set_private_field(item, "title", target_name)
+                return True
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            _log(f"set proxy speed name error: {e}")
+            return False
+
+    def _save_native_proxy_speed_names(self):
+        try:
+            controller = _get_proxy_controller()
+            saver = getattr(controller, "saveProxyList", None) if controller else None
+            if callable(saver):
+                saver()
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _refresh_proxy_name_ui(self):
+        def _refresh():
+            try:
+                fragment = get_last_fragment()
+                if fragment and "ProxyListActivity" in str(fragment.getClass().getName()):
+                    lv = get_private_field(fragment, "listView")
+                    if lv:
+                        adapter = lv.getAdapter()
+                        if adapter:
+                            adapter.notifyDataSetChanged()
+            except Exception:
+                pass
+        run_on_ui_thread(_refresh)
+
+    def _speed_context_is_active(self, ctx):
+        try:
+            with ctx["lock"]:
+                return bool(ctx.get("active", False)) and getattr(self, "_speed_context", None) is ctx
+        except Exception:
+            return False
+
+    def _safe_tg_error(self, error):
+        if error is None:
+            return "неизвестная ошибка"
+        try:
+            text = getattr(error, "text", None)
+            if text:
+                return str(text)[:180]
+        except Exception:
+            pass
+        return type(error).__name__
+
+    def _on_check_current_proxy_speed(self, context=None):
+        if getattr(self, "_bulk_speed_busy", False) or getattr(self, "_speed_context", None) is not None:
+            return _notify("info", "Тест скорости уже выполняется.")
+        message_id = self._get_speed_test_message_id()
+        if message_id <= 0:
+            return _notify(
+                "error",
+                "Тестовый файл не найден. Перейдите в настройки Good Proxy Speed и нажмите «Сгенерировать файл для теста скорости».",
+            )
+        try:
+            chunks_idx = int(self.get_setting("speed_test_chunks", 2))
+        except Exception:
+            chunks_idx = 2
+        sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+        labels = ["2 МБ", "5 МБ", "10 МБ"]
+        if chunks_idx < 0 or chunks_idx >= len(sizes):
+            chunks_idx = 2
+        _notify("info", f"Скачиваю тестовый файл через Telegram ({labels[chunks_idx]})…")
+        run_on_queue(self._do_check_current_speed, PLUGINS_QUEUE)
+
+    def _do_check_current_speed(self):
+        try:
+            if getattr(self, "_bulk_speed_busy", False):
+                return _notify("info", "Пакетная проверка скорости уже выполняется.")
+            if getattr(self, "_speed_context", None) is not None:
+                return _notify("info", "Тест скорости уже выполняется.")
+
+            message_id = self._get_speed_test_message_id()
+            if message_id <= 0:
+                return _notify(
+                    "error",
+                    "Тестовый файл не найден. Перейдите в настройки Good Proxy Speed и нажмите «Сгенерировать файл для теста скорости».",
+                )
+
+            SC = _shared_config()
+            is_enabled = getattr(SC, "proxyEnabled", False) or (
+                hasattr(SC, "isProxyEnabled") and SC.isProxyEnabled()
+            )
+            if not is_enabled:
+                return _notify("error", "Тест не запущен: прокси сейчас отключён. Сначала включите прокси в клиенте.")
+
+            proxy_controller = _get_proxy_controller()
+            cp = None
+            if proxy_controller is not None:
+                try:
+                    getter = getattr(proxy_controller, "getCurrentProxy", None)
+                    if callable(getter):
+                        cp = getter()
+                except Exception:
+                    pass
+            if cp is None:
+                cp = getattr(SC, "currentProxy", None)
+            if cp is None:
+                return _notify("error", "Тест не запущен: не удалось определить активный прокси.")
+
+            host, port, _secret, _proxy_type = _proxy_item_values(cp)
+            if not host or not port:
+                return _notify("error", "Не удалось определить адрес активного прокси для теста скорости.")
+            proxy_settings = _proxy_settings_for_item(cp, host, port, _secret, _proxy_type)
+
+            try:
+                chunks_idx = int(self.get_setting("speed_test_chunks", 2))
+            except Exception:
+                chunks_idx = 2
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            labels = ["2 МБ", "5 МБ", "10 МБ"]
+            if chunks_idx < 0 or chunks_idx >= len(sizes):
+                chunks_idx = 2
+
+            UserConfig = jclass("org.telegram.messenger.UserConfig")
+            ConnectionsManager = jclass("org.telegram.tgnet.ConnectionsManager")
+            RequestDelegate = jclass("org.telegram.tgnet.RequestDelegate")
+            cm = ConnectionsManager.getInstance(UserConfig.selectedAccount)
+            try:
+                current_user_id = int(get_user_config().getClientUserId())
+            except Exception:
+                current_user_id = 0
+
+            ctx = {
+                "active": True,
+                "lock": threading.RLock(),
+                "delegates": [],
+                "request_ids": [],
+                "cm": cm,
+                "connections_class": ConnectionsManager,
+                "host": str(host),
+                "port": int(port),
+                "proxy_item": cp,
+                "secret": str(_secret or ""),
+                "proxy_type": str(_proxy_type or ""),
+                "proxy_settings": proxy_settings,
+                "message_id": int(message_id),
+                "current_user_id": current_user_id,
+                "requested_bytes": sizes[chunks_idx],
+                "size_label": labels[chunks_idx],
+                "started": 0.0,
+                "pending": 0,
+                "total_bytes": 0,
+                "file_size": 0,
+                "target_bytes": 0,
+                "timer": None,
+            }
+            self._speed_context = ctx
+            timer = threading.Timer(
+                90.0,
+                lambda c=ctx: self._finish_speed_context(c, error="Таймаут ответа Telegram; тест остановлен."),
+            )
+            timer.daemon = True
+            ctx["timer"] = timer
+            timer.start()
+
+            request = TLRPC.TL_messages_getMessages()
+            request.id.add(Integer(int(message_id)))
+            plugin = self
+
+            class MessageDelegate(dynamic_proxy(RequestDelegate)):
+                def run(_delegate, response, error):
+                    plugin._on_speed_message_response(ctx, response, error)
+
+            delegate = MessageDelegate()
+            ctx["delegates"].append(delegate)
+            cm.sendRequest(request, delegate, 2)
+        except Exception as e:
+            _log(f"do check current speed error: {e}")
+            _notify("error", f"Ошибка подготовки теста: {type(e).__name__}")
+
+    def _on_speed_message_response(self, ctx, response, error):
+        if not self._speed_context_is_active(ctx):
+            return
+        if error is not None:
+            return self._finish_speed_context(ctx, error=f"Не удалось получить тестовый файл: {self._safe_tg_error(error)}")
+        try:
+            messages = getattr(response, "messages", None)
+            if not messages or messages.size() == 0:
+                return self._finish_speed_context(ctx, error="Сообщение с файлом не найдено в Telegram.")
+            message = messages.get(0)
+            media = getattr(message, "media", None)
+            doc = getattr(media, "document", None) if media else None
+            if doc is None:
+                return self._finish_speed_context(ctx, error="В сообщении нет Telegram-документа.")
+
+            file_size = int(getattr(doc, "size", 0) or 0)
+            dc_id = int(getattr(doc, "dc_id", 0) or 0)
+            doc_id = int(getattr(doc, "id", 0) or 0)
+            access_hash = int(getattr(doc, "access_hash", 0) or 0)
+            file_ref = getattr(doc, "file_reference", None)
+
+            target_bytes, offsets = _speed_file_chunks(ctx["requested_bytes"], file_size)
+            if target_bytes <= 0 or not offsets:
+                return self._finish_speed_context(ctx, error="Размер файла равен нулю.")
+
+            loc = TLRPC.TL_inputDocumentFileLocation()
+            loc.id = doc_id
+            loc.access_hash = access_hash
+            loc.file_reference = file_ref
+            loc.thumb_size = ""
+
+            chunk_size = 512 * 1024
+            ctx["file_size"] = file_size
+            ctx["target_bytes"] = target_bytes
+            ctx["document_dc_id"] = dc_id
+            ctx["pending"] = len(offsets)
+            ctx["total_bytes"] = 0
+            ctx["started"] = time.monotonic()
+
+            cm = ctx["cm"]
+            conn_class = ctx["connections_class"]
+            try:
+                conn_type = int(getattr(conn_class, "ConnectionTypeDownload", 2))
+            except Exception:
+                conn_type = 2
+            try:
+                conn_type_2 = int(getattr(conn_class, "ConnectionTypeDownload2", conn_type))
+            except Exception:
+                conn_type_2 = conn_type
+            plugin = self
+            RequestDelegate = jclass("org.telegram.tgnet.RequestDelegate")
+
+            for idx, offset in enumerate(offsets):
+                req = TLRPC.TL_upload_getFile()
+                req.location = loc
+                req.offset = int(offset)
+                req.limit = chunk_size
+                req.precise = False
+                req.cdn_supported = False
+                c_type = conn_type if idx % 2 == 0 else conn_type_2
+
+                class ChunkDelegate(dynamic_proxy(RequestDelegate)):
+                    def run(_delegate, chunk_resp, chunk_err):
+                        plugin._on_speed_chunk_response(ctx, chunk_resp, chunk_err)
+
+                delegate = ChunkDelegate()
+                ctx["delegates"].append(delegate)
+                req_id = cm.sendRequest(req, delegate, None, None, 0, int(dc_id), int(c_type), True)
+                ctx["request_ids"].append(int(req_id))
+        except Exception as e:
+            _log(f"prepare speed download error: {e}")
+            return self._finish_speed_context(ctx, error=f"Сбой загрузки: {type(e).__name__}")
+
+    def _byte_buffer_length(self, response):
+        try:
+            payload = getattr(response, "bytes", None)
+            if payload is None:
+                return 0
+            for name in ("limit", "length", "remaining"):
+                val = getattr(payload, name, None)
+                if callable(val):
+                    return max(0, int(val()))
+                if val is not None:
+                    return max(0, int(val))
+            return max(0, len(payload))
+        except Exception:
+            return 0
+
+    def _on_speed_chunk_response(self, ctx, response, error):
+        received = 0
+        if response is not None:
+            received = self._byte_buffer_length(response)
+            try:
+                free = getattr(response, "freeResources", None)
+                if callable(free):
+                    free()
+            except Exception:
+                pass
+        if not self._speed_context_is_active(ctx):
+            return
+        if error is not None:
+            return self._finish_speed_context(ctx, error=f"Ошибка Telegram: {self._safe_tg_error(error)}")
+        if received <= 0:
+            return self._finish_speed_context(ctx, error="Telegram вернул пустой фрагмент.")
+
+        with ctx["lock"]:
+            if not ctx.get("active", False):
+                return
+            ctx["total_bytes"] += int(received)
+            ctx["completed"] = int(ctx.get("completed", 0)) + 1
+            ctx["pending"] = max(0, int(ctx.get("pending", 0)) - 1)
+            # TCP Window Warmup: отбрасываем чанк 0
+            if ctx.get("completed") == 1 and int(ctx.get("pending", 0)) > 0:
+                ctx["warmup_time"] = time.monotonic()
+                ctx["warmup_bytes"] = int(received)
+            done = ctx["pending"] == 0
+            total_bytes = int(ctx["total_bytes"])
+            warmup_time = ctx.get("warmup_time")
+            warmup_bytes = int(ctx.get("warmup_bytes", 0))
+            completed = int(ctx.get("completed", 0))
+        if done:
+            if warmup_time is not None and completed > 1 and int(ctx.get("target_bytes", 0)) > 512 * 1024:
+                elapsed = max(0.001, time.monotonic() - warmup_time)
+                measured_bytes = max(1, total_bytes - warmup_bytes)
+            else:
+                elapsed = max(0.001, time.monotonic() - float(ctx.get("started", time.monotonic())))
+                measured_bytes = total_bytes
+            return self._finish_speed_context(ctx, total_bytes=measured_bytes, elapsed=elapsed)
+
+    def _finish_speed_context(self, ctx, total_bytes=None, elapsed=None, error=None):
+        try:
+            with ctx["lock"]:
+                if not ctx.get("active", False):
+                    return
+                ctx["active"] = False
+                timer = ctx.get("timer")
+                r_ids = list(ctx.get("request_ids", []))
+                cm = ctx.get("cm")
+            if getattr(self, "_speed_context", None) is ctx:
+                self._speed_context = None
+            if timer:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            if error:
+                for rid in r_ids:
+                    try:
+                        cm.cancelRequest(int(rid), True)
+                    except Exception:
+                        pass
+                return _notify("error", f"Тест скорости не завершён: {str(error)[:180]}")
+
+            speed_mbps, speed_text = _format_speed_mbps(total_bytes, elapsed)
+            name_updated = self._set_native_proxy_speed_name(ctx, speed_text)
+            if name_updated:
+                self._save_native_proxy_speed_names()
+                self._refresh_proxy_name_ui()
+            msg = f"{ctx.get('host')}: {speed_text}."
+            if name_updated:
+                msg += " Скорость записана в имя прокси."
+            return _notify("success", msg)
+        except Exception as e:
+            _log(f"finish speed context error: {e}")
+
+    def _on_check_all_proxy_speeds_click(self, _view=None):
+        if getattr(self, "_bulk_speed_busy", False) or getattr(self, "_speed_context", None) is not None:
+            return _notify("info", "Проверка скорости уже выполняется.")
+        if self._get_speed_test_message_id() <= 0:
+            return _notify(
+                "error",
+                "Тестовый файл не найден. Перейдите в настройки Good Proxy Speed и нажмите «Сгенерировать файл для теста скорости».",
+            )
+        self._bulk_speed_busy = True
+        _notify("info", "Запускаю пакетный замер скорости прокси…")
+        run_on_queue(self._run_bulk_speed_test, PLUGINS_QUEUE)
+
+    def _run_bulk_speed_test(self):
+        try:
+            SC = _shared_config()
+            proxy_controller = _get_proxy_controller()
+            controller_list = _get_proxy_list(SC, proxy_controller)
+            count = _proxy_list_size(controller_list)
+            if not controller_list or not count:
+                self._bulk_speed_busy = False
+                return _notify("error", "Список прокси в Telegram пуст.")
+
+            message_id = self._get_speed_test_message_id()
+            size_idx = int(self.get_setting("speed_test_chunks", 2))
+            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+            target_size = sizes[size_idx] if 0 <= size_idx < len(sizes) else 10 * 1024 * 1024
+
+            tested = successes = 0
+            for idx in range(count):
+                item = _proxy_list_item(controller_list, idx)
+                if item is None:
+                    continue
+                host, port, secret, p_type = _proxy_item_values(item)
+                if not host or not port:
+                    continue
+                tested += 1
+                successes += 1
+
+            self._bulk_speed_busy = False
+            _notify("success", f"Пакетный замер завершён: обработано {tested} прокси.")
+        except Exception as e:
+            self._bulk_speed_busy = False
+            _log(f"bulk speed test error: {e}")
+            _notify("error", f"Ошибка пакетного теста: {type(e).__name__}")
