@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -29,14 +29,10 @@ __icon__ = "OliverEmoji/21"
 # All mirrors point to the same upstream repository. The old CDN entries had
 # missing/shortened owner names and therefore returned 404 or unrelated pages.
 PROXIES_URLS = [
-    "https://cdn.jsdelivr.net/gh/theakres/Proxy@main/proxies.json",
-    "https://proxy.akres.xyz/proxies.json",
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
-    "https://fastly.jsdelivr.net/gh/theakres/Proxy@main/proxies.json",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
-    "https://raw.githubusercontent.com/theakres/Proxy/main/proxies.json",
-    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
 ]
 
 PLUGIN_UPDATE_URLS = [
@@ -1619,9 +1615,8 @@ class ProxyManagerPlugin(BasePlugin):
         compact_results = []
         reachable = 0
         short_names = {
-            "proxy.akres.xyz": "Akres CDN",
-            "cdn.jsdelivr.net": "jsDelivr",
             "fastly.jsdelivr.net": "Fastly",
+            "cdn.jsdelivr.net": "jsDelivr",
             "raw.githubusercontent.com": "GitHub Raw",
             "ghproxy.net": "ghproxy",
         }
@@ -1629,9 +1624,8 @@ class ProxyManagerPlugin(BasePlugin):
         for url in PROXIES_URLS:
             host = (urlparse(url).hostname or url).lower()
             source_name = {
-                "proxy.akres.xyz": "proxy.akres.xyz (Akres CDN)",
-                "cdn.jsdelivr.net": "cdn.jsdelivr.net / jsDelivr (зеркало)",
                 "fastly.jsdelivr.net": "fastly.jsdelivr.net / jsDelivr (зеркало)",
+                "cdn.jsdelivr.net": "cdn.jsdelivr.net / jsDelivr (зеркало)",
                 "raw.githubusercontent.com": "raw.githubusercontent.com (GitHub)",
                 "ghproxy.net": "ghproxy.net (зеркало)",
             }.get(host, host)
@@ -2367,6 +2361,7 @@ class ProxyManagerPlugin(BasePlugin):
                 )
 
             added = failed = 0
+            already_present = 0
             first_add_error = ""
             add_api_used = False
             controller_api_used = False
@@ -2378,6 +2373,9 @@ class ProxyManagerPlugin(BasePlugin):
                     proxy.get("secret", ""),
                     proxy.get("type", "mtproto"),
                 )
+                if key in existing:
+                    already_present += 1
+                    continue
                 try:
                     info = _make_proxy_info(ProxyInfo, proxy)
                 except Exception as e:
@@ -2481,6 +2479,8 @@ class ProxyManagerPlugin(BasePlugin):
                 f"Источник: {host}{tier_tag}. Отобрано: {len(parsed)}. "
                 f"Добавлено в клиент: {added}."
             )
+            if already_present:
+                summary += f" Уже было в клиенте: {already_present}."
             if failed:
                 summary += f" Не удалось добавить из источника: {failed}."
                 if first_add_error:
