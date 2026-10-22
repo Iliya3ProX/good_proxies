@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -1330,6 +1330,23 @@ class ProxyManagerPlugin(BasePlugin):
         except Exception as e:
             _log(f"create_settings import section error: {e}")
 
+        # --- Секция: Фильтрация протоколов ---
+        try:
+            try:
+                rows.append(Divider(text="Выберите разрешенные типы и протоколы прокси для импорта."))
+            except Exception:
+                pass
+            rows.append(Header(text="Протоколы MTProto"))
+            rows.append(Switch(key="proto_faketls", text="FakeTLS", default=True))
+            rows.append(Switch(key="proto_padding", text="Padding", default=True))
+            rows.append(Header(text="Протоколы WebProxy"))
+            rows.append(Switch(key="proto_websocket", text="WebSocket", default=True))
+            rows.append(Switch(key="proto_websocket_lanes", text="WebSocket-Lanes", default=True))
+            rows.append(Switch(key="proto_https", text="HTTPS", default=True))
+            rows.append(Switch(key="proto_https_lanes", text="HTTPS-Lanes", default=True))
+        except Exception as e:
+            _log(f"create_settings protocol filters error: {e}")
+
         # --- Секция 2: Замер скорости ---
         try:
             try:
@@ -2122,6 +2139,26 @@ class ProxyManagerPlugin(BasePlugin):
         finally:
             self._cleanup_busy = False
 
+    def _is_allowed(self, p):
+        p_type = str(p.get("type", "mtproto")).lower()
+        secret = str(p.get("secret", "") or "").lower()
+        if p_type == "mtproto":
+            if secret.startswith("ee"):
+                return bool(self.get_setting("proto_faketls", True))
+            return bool(self.get_setting("proto_padding", True))
+        elif p_type == "web":
+            via = str(p.get("via", "") or "").lower()
+            if via == "websocket":
+                return bool(self.get_setting("proto_websocket", True))
+            elif via == "websocket-lanes":
+                return bool(self.get_setting("proto_websocket_lanes", True))
+            elif via == "https":
+                return bool(self.get_setting("proto_https", True))
+            elif via == "https-lanes":
+                return bool(self.get_setting("proto_https_lanes", True))
+            return True
+        return True
+
     def _get_active_urls(self):
         try:
             value = self.get_setting("use_ghproxy", True)
@@ -2243,6 +2280,8 @@ class ProxyManagerPlugin(BasePlugin):
                     if source_url is None:
                         source_url = url
                     for p in current:
+                        if not self._is_allowed(p):
+                            continue
                         pkey = _proxy_key(
                             p.get("host"),
                             p.get("port"),
@@ -2473,30 +2512,57 @@ class ProxyManagerPlugin(BasePlugin):
             merged_list = _merge_proxy_lists(controller_list, shared_list)
             if not merged_list:
                 return _notify("info", "Нет прокси для экспорта.")
-            proxies = []
+
+            faketls, padding, web = [], [], []
             for p in merged_list:
-                host, port, secret, _proxy_type = _proxy_item_values(p)
-                if host and port:
-                    proxies.append({"host": host, "port": port, "secret": secret})
+                host, port, secret, kind = _proxy_item_values(p)
+                if not host:
+                    continue
+                kind_str = str(kind or "").upper()
+                if kind_str == "WEB" or int(port or 0) == 0:
+                    web.append(f"tg://webproxy?server={host}&secret={secret}")
+                else:
+                    e = {
+                        "addr": host,
+                        "port": int(port or 443),
+                        "secret": str(secret or ""),
+                        "line": f"tg://proxy?server={host}&port={port}&secret={secret}",
+                    }
+                    if str(secret).lower().startswith("ee"):
+                        faketls.append(e)
+                    else:
+                        padding.append(e)
 
-            def sort_key(p):
+            def _mtp_sort_key(e):
                 try:
-                    h_val = (0, ipaddress.ip_address(p['host']).version, ipaddress.ip_address(p['host']))
-                except ValueError:
-                    h_val = (1, 0, p['host'])
-                return (h_val, p['port'], len(p['secret']), p['secret'])
+                    ip_key = (0, int(ipaddress.ip_address(e["addr"])))
+                except Exception:
+                    ip_key = (1, e["addr"])
+                return (ip_key, e["port"], len(e["secret"]), e["secret"])
 
-            lines = []
-            for p in sorted(proxies, key=sort_key):
-                speed = p.get('speed', '')
-                speed_tag = f"#?{speed.replace(' ', '')}" if speed else ""
-                lines.append(f"tg://proxy?server={p['host']}&port={p['port']}&secret={p['secret']}{speed_tag}")
+            def _web_sort_key(line):
+                p = parse_qs(urlparse(line).query)
+                return (p.get("server", [""])[0], p.get("secret", [""])[0])
 
-            if not lines:
-                return _report_error("Не удалось сформировать список.")
-            txt = "\n".join(lines)
+            faketls.sort(key=_mtp_sort_key)
+            padding.sort(key=_mtp_sort_key)
+            web.sort(key=_web_sort_key)
+
+            sections = []
+            if faketls:
+                sections.append("FakeTLS (MTProto):\n" + "\n".join(e["line"] for e in faketls))
+            if padding:
+                sections.append("Padding / Classic (MTProto):\n" + "\n".join(e["line"] for e in padding))
+            if web:
+                sections.append("WebProxy:\n" + "\n".join(web))
+
+            if not sections:
+                return _report_error("Не удалось сформировать список прокси.")
+
+            txt = "\n\n".join(sections)
             _copy_to_clipboard(txt, label="GoodProxy_Export")
-            _notify("success", f"Экспортировано {len(lines)} прокси! Скопировано в буфер обмена.")
+            total = len(faketls) + len(padding) + len(web)
+            _notify("success", f"Экспортировано {total} прокси! Скопировано в буфер обмена.")
         except Exception as e:
             _log(f"export error: {e}")
             _report_error(f"Ошибка экспорта: {e}")
