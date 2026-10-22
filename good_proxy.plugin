@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -40,10 +40,10 @@ PROXIES_URLS = [
 ]
 
 PLUGIN_UPDATE_URLS = [
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
 ]
 
 
@@ -1469,8 +1469,9 @@ class ProxyManagerPlugin(BasePlugin):
                 return
 
         def task():
-            remote_bytes = None
-            remote_version = None
+            current_ver_tuple = _parse_semver(__version__)
+            highest_remote_version = None
+            highest_remote_bytes = None
             errors = []
             for base_url in PLUGIN_UPDATE_URLS:
                 host = urlparse(base_url).hostname or base_url
@@ -1492,9 +1493,13 @@ class ProxyManagerPlugin(BasePlugin):
                             header_sample = data[:3000].decode("utf-8", errors="ignore")
                             m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
                             if m:
-                                remote_version = m.group(1).strip()
-                                remote_bytes = data
-                                break
+                                cand_version = m.group(1).strip()
+                                cand_tuple = _parse_semver(cand_version)
+                                if highest_remote_version is None or cand_tuple > _parse_semver(highest_remote_version):
+                                    highest_remote_version = cand_version
+                                    highest_remote_bytes = data
+                                if cand_tuple > current_ver_tuple:
+                                    break
                             else:
                                 errors.append(f"{host}: версия не распознана")
                         else:
@@ -1505,21 +1510,27 @@ class ProxyManagerPlugin(BasePlugin):
                     _log(f"Check update mirror {url} failed: {e}")
                     continue
 
-            if not remote_bytes or not remote_version:
+            if not highest_remote_bytes or not highest_remote_version:
                 if manual:
                     details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
                     _notify("error", f"Не удалось проверить обновления плагина:\n{details}")
                 return
 
-            if _parse_semver(remote_version) > _parse_semver(__version__):
+            if _parse_semver(highest_remote_version) > current_ver_tuple:
                 try:
-                    from file_utils import get_plugins_dir
-                    pdir = str(get_plugins_dir())
-                    plugin_file = os.path.join(pdir, "good_proxy.plugin")
-                    with open(plugin_file, "wb") as f:
-                        f.write(remote_bytes)
-                    _log(f"Plugin successfully updated to v{remote_version}")
-                    _notify("success", f"Плагин Good Proxy обновлен до v{remote_version}!\nПерезапустите Telegram для применения изменений.")
+                    target_file = None
+                    try:
+                        if "__file__" in globals() and __file__ and os.path.isfile(__file__):
+                            target_file = __file__
+                    except Exception:
+                        pass
+                    if not target_file:
+                        from file_utils import get_plugins_dir
+                        target_file = os.path.join(str(get_plugins_dir()), "good_proxy.plugin")
+                    with open(target_file, "wb") as f:
+                        f.write(highest_remote_bytes)
+                    _log(f"Plugin successfully updated to v{highest_remote_version} at {target_file}")
+                    _notify("success", f"Плагин Good Proxy обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
                 except Exception as e:
                     _log(f"Failed to write updated plugin file: {e}")
                     if manual:
