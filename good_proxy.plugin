@@ -36,10 +36,10 @@ PROXIES_URLS = [
 ]
 
 PLUGIN_UPDATE_URLS = [
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
-    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
 ]
 
 
