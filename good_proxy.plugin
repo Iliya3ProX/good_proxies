@@ -1,62 +1,1004 @@
+import html as html_lib
 import ipaddress
 import json
 import os
-import socket
+import re
 import threading
 import time
 import urllib.request
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
+
 from android_utils import OnClickListener, log, run_on_ui_thread
 from base_plugin import BasePlugin, MenuItemData, MenuItemType, MethodHook
 from client_utils import PLUGINS_QUEUE, get_last_fragment, get_user_config, run_on_queue, send_message
-from hook_utils import find_class, get_private_field
+from hook_utils import find_class, get_private_field, set_private_field
 from ui.bulletin import BulletinHelper
 from java import dynamic_proxy, jclass
-from java.lang import Integer
+from java.lang import Boolean as JBoolean, Integer
 from org.telegram.tgnet import TLRPC
 
 __id__ = "good_proxy"
 __name__ = "Good Proxy"
-__description__ = "Добавляет кнопку получения проверенных MTProto-прокси в меню прокси, экспорт в Избранное и действие замера скорости текущего прокси на кнопке поиска."
-__author__ = "@MouXoziain"
-__version__ = "1.5.0"
-__min_version__ = "12.1.1"
+__description__ = "Сборщик рабочих прокси из открытых источников."
+__author__ = "@MouXoziain & Gemini"
+__version__ = "2.2.2"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
 
+# All mirrors point to the same upstream repository. The old CDN entries had
+# missing/shortened owner names and therefore returned 404 or unrelated pages.
 PROXIES_URLS = [
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
 ]
+
+PLUGIN_UPDATE_URLS = [
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
+]
+
+
+def _copy_to_clipboard(text, label="GoodProxy_Proxies"):
+    """Копирует текст в буфер обмена Android (через AndroidUtilities или ClipboardManager)."""
+    try:
+        from org.telegram.messenger import AndroidUtilities
+        AndroidUtilities.addToClipboard(text)
+        return True
+    except Exception as e:
+        _log(f"AndroidUtilities.addToClipboard error: {e}")
+    try:
+        from org.telegram.messenger import ApplicationLoader
+        from android.content import ClipData, Context
+        context = ApplicationLoader.applicationContext
+        if context:
+            clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+            clip = ClipData.newPlainText(label, text)
+            clipboard.setPrimaryClip(clip)
+            return True
+    except Exception as e:
+        _log(f"ClipboardManager fallback error: {e}")
+    return False
+
+
+def _parse_semver(v_str):
+    """Парсит semver-строку в кортеж чисел для корректного сравнения версий."""
+    parts = []
+    for part in re.split(r"[^\d]+", str(v_str or "").strip()):
+        if part.isdigit():
+            parts.append(int(part))
+    return tuple(parts) or (0, 0, 0)
+
+
+
+def _log(msg):
+    try:
+        log(f"[GoodProxy] {msg}")
+    except Exception:
+        pass
+
 
 def _shared_config():
     return jclass("org.telegram.messenger.SharedConfig")
 
-def _parse_proxy(line):
-    if not (line := line.strip()) or not line.startswith("tg://proxy"): return None
+
+def _show_modal_alert(title, message, button_text="Закрыть"):
+    """Show a non-dismissible-until-button alert; caller must run on the UI thread."""
     try:
-        u = urlparse(line)
-        p = parse_qs(u.query)
-        host, port = p.get("server", [None])[0], p.get("port", [None])[0]
-        if host and port:
-            speed = ""
-            if u.fragment:
-                speed = u.fragment.replace("⚡", "").replace("MBs", " МБ/с").replace("Mbs", " МБ/с").strip()
-            return {
-                "host": host,
-                "port": int(port),
-                "secret": p.get("secret", [""])[0],
-                "speed": speed
-            }
-    except Exception: pass
+        from ui.alert import AlertDialogBuilder
+        fragment = get_last_fragment()
+        context = fragment.getParentActivity() if fragment is not None else None
+        if context is None:
+            return False
+        builder = AlertDialogBuilder(context)
+        builder.set_title(str(title or "Good Proxy"))
+        builder.set_message(str(message or ""))
+        builder.set_positive_button(
+            str(button_text or "Закрыть"),
+            lambda dialog, _which: dialog.dismiss(),
+        )
+        builder.create()
+        builder.set_cancelable(False)
+        builder.set_canceled_on_touch_outside(False)
+        builder.show()
+        return True
+    except Exception as e:
+        _log(f"modal alert failed: {type(e).__name__}")
+        return False
+
+
+def _notify(kind, message):
+    """Show local UI only; errors use a modal that stays until its close button is pressed."""
+    detail = str(message or "")
+    if str(kind or "").lower() == "error":
+        max_chars = 6000
+        if len(detail) > max_chars:
+            detail = detail[:max_chars].rstrip() + "\n\nТекст сокращён; подробный отчёт см. в «Избранном»."
+
+        def _show_error():
+            if _show_modal_alert("Good Proxy — ошибка", detail, "Закрыть"):
+                return
+            _log("No Activity for modal error alert; showing fallback bulletin")
+            method = getattr(BulletinHelper, "show_error", None)
+            if callable(method):
+                try:
+                    method(detail[:1000])
+                except Exception:
+                    pass
+        run_on_ui_thread(_show_error)
+        return True
+
+    method = getattr(BulletinHelper, f"show_{kind}", None)
+    if callable(method):
+        run_on_ui_thread(lambda m=method, text=detail: m(text))
+    else:
+        _log(f"Unknown bulletin kind: {kind}")
+    return True
+
+
+def _proxy_connection_link(host, port, settings=None, proxy_type="", secret=""):
+    """Build a shareable Telegram link; credentials are included only in this requested link."""
+    fields = _proxy_settings_fields(settings) or {}
+    kind = str(fields.get("type") or proxy_type or "").split(".")[-1].upper()
+    secret_value = str(fields.get("secret", "") or secret or "")
+    if not kind:
+        kind = "MTPROTO" if secret_value else "SOCKS5"
+    server = str(host or fields.get("address", "")).strip()
+    port_value = int(port or fields.get("port", 0) or 0)
+    if not server or port_value <= 0:
+        return ""
+    params = {"server": server, "port": port_value}
+    if kind == "SOCKS5":
+        username = str(fields.get("username", "") or "")
+        password = str(fields.get("password", "") or "")
+        if username:
+            params["user"] = username
+        if password:
+            params["pass"] = password
+        return "https://t.me/socks?" + urlencode(params)
+    if kind != "MTPROTO" or not secret_value:
+        return ""
+    params["secret"] = secret_value
+    return "https://t.me/proxy?" + urlencode(params)
+
+
+def _send_saved_output(message, title=None):
+    """Подавлен: сохранение технического вывода в «Избранное» отключено."""
+    _log(f"[{title or 'output'}] {str(message)[:240]}")
+    return True
+
+
+def _report_error(message):
+    """Отображает ошибку пользователю через всплывающее уведомление без спама в «Избранное»."""
+    detail = str(message or "Неизвестная ошибка")
+    _log(f"Report error: {detail[:240]}")
+    _notify("error", detail)
+    return True
+    _notify("error", visible)
+    return sent
+
+
+_PROXY_LINK_RE = re.compile(
+    r"(?:tg://(?:proxy|webproxy)|https?://t\.me/(?:proxy|webproxy))\?[^\s<>\"'`]+",
+    re.IGNORECASE,
+)
+_SAVED_OUTPUT_URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+
+
+def _proxy_key(host, port, secret="", proxy_type="mtproto"):
+    """Canonical key used for de-duplication across URL/source variants."""
+    p_type = str(proxy_type or "mtproto").lower()
+    if p_type == "web" or int(port or 0) == 0:
+        return f"web:{str(host or '').strip().lower()}:{str(secret or '').strip()}"
+    return f"mtproto:{str(host or '').strip().lower()}:{int(port)}:{str(secret or '').strip()}"
+
+
+def _safe_proxy_log_host(value):
+    """Reduce a proxy address to a host label; strip URL userinfo/path/query before logging."""
+    text = str(value or "").strip()
+    if not text:
+        return "<unknown>"
+    if "://" not in text and text.count(":") >= 2 and not text.startswith("[") and "@" not in text and "/" not in text:
+        return f"[{text}]"
+    try:
+        parsed = urlparse(text if "://" in text else "//" + text)
+        host = parsed.hostname
+        if host:
+            return f"[{host}]" if ":" in host and not host.startswith("[") else host
+    except Exception:
+        pass
+    return text.rsplit("@", 1)[-1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+
+
+def _native_cleanup_decision(status_by_key, controller_keys, current_key=None):
+    """Only completed-unavailable matches are deletable; unknowns and current stay."""
+    status_by_key = dict(status_by_key or {})
+    controller_keys = set(controller_keys or ())
+    available = {key for key, value in status_by_key.items() if bool(value)}
+    unavailable = {key for key, value in status_by_key.items() if not bool(value)}
+    unknown = controller_keys - set(status_by_key)
+    candidates = unavailable & controller_keys
+    current_kept = bool(current_key and current_key in candidates)
+    if current_key:
+        candidates.discard(current_key)
+    return candidates, available, unavailable, unknown, current_kept
+
+
+def _proxy_settings_for_item(item, host=None, port=None, secret=None, proxy_type=None):
+    """Return the client's ProxySettings for temporary per-account proxy routing."""
+    settings = None
+    try:
+        settings = get_private_field(item, "settings")
+    except Exception:
+        pass
+    if settings is None:
+        try:
+            settings = getattr(item, "settings", None)
+        except Exception:
+            pass
+    if settings is not None:
+        try:
+            is_valid = getattr(settings, "isValid", None)
+            if callable(is_valid) and not bool(is_valid()):
+                return None
+        except Exception:
+            return None
+        return settings
+
+    if host is None or port is None or secret is None or proxy_type is None:
+        try:
+            host, port, secret, proxy_type = _proxy_item_values(item)
+        except Exception:
+            return None
+    type_name = str(proxy_type or "").split(".")[-1].upper()
+    if type_name not in ("MTPROTO", "SOCKS5", "WEB"):
+        type_name = "MTPROTO" if str(secret or "").strip() else "SOCKS5"
+    try:
+        ProxySettings = jclass("org.telegram.utils.proxy.ProxySettings")
+        ProxyType = jclass("org.telegram.utils.proxy.ProxySettings$Type")
+        builder = ProxySettings.builder()
+        builder.setType(getattr(ProxyType, type_name))
+        builder.setAddress(str(host))
+        builder.setPort(int(port))
+        if type_name in ("MTPROTO", "WEB"):
+            builder.setSecret(str(secret or ""))
+        else:
+            username = getattr(item, "username", "") or get_private_field(item, "username") or ""
+            password = getattr(item, "password", "") or get_private_field(item, "password") or ""
+            builder.setUser(str(username))
+            builder.setPassword(str(password))
+        result = builder.build()
+        is_valid = getattr(result, "isValid", None)
+        if callable(is_valid) and not bool(is_valid()):
+            return None
+        return result
+    except Exception as e:
+        _log(f"ProxySettings temporary-route build failed: {type(e).__name__}")
+        return None
+
+
+def _proxy_settings_fields(settings):
+    """Read native proxy parameters without ever formatting them into diagnostics."""
+    if settings is None:
+        return None
+    def get_value(method_name, field_name, default=""):
+        try:
+            method = getattr(settings, method_name, None)
+            if callable(method):
+                return method()
+        except Exception:
+            pass
+        try:
+            value = getattr(settings, field_name, None)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+        try:
+            value = get_private_field(settings, field_name)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+        return default
+    try:
+        kind = str(get_value("getType", "type", "") or "").split(".")[-1].upper()
+        return {
+            "type": kind,
+            "address": str(get_value("getAddress", "address", "") or "").strip(),
+            "port": int(get_value("getPort", "port", 0) or 0),
+            "username": str(get_value("getUser", "user", "") or ""),
+            "password": str(get_value("getPassword", "password", "") or ""),
+            "secret": str(get_value("getSecret", "secret", "") or ""),
+        }
+    except Exception:
+        return None
+
+
+
+def _parse_proxy(line):
+    """Parse one tg://proxy, tg://webproxy, or t.me link; return None for other text."""
+    try:
+        text = html_lib.unescape(str(line or "")).strip().lstrip("\ufeff")
+        match = _PROXY_LINK_RE.search(text)
+        link = match.group(0) if match else text
+        link = link.rstrip(".,;!)]}\u00bb")
+        u = urlparse(link)
+        scheme = (u.scheme or "").lower()
+        if scheme == "tg":
+            if (u.netloc or "").lower() not in ("proxy", "webproxy"):
+                return None
+        elif scheme in ("http", "https"):
+            if (u.hostname or "").lower() != "t.me" or u.path.rstrip("/").lower() not in ("/proxy", "/webproxy"):
+                return None
+        else:
+            return None
+
+        is_web = (u.netloc or "").lower() == "webproxy" or u.path.rstrip("/").lower() == "/webproxy"
+        params = parse_qs(u.query, keep_blank_values=True)
+        host = str(params.get("server", [""])[0]).strip()
+        raw_port = str(params.get("port", [""])[0]).strip()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if not host:
+            return None
+        if not is_web and not raw_port:
+            return None
+        port = int(raw_port) if raw_port else 443
+        if not (1 <= port <= 65535):
+            return None
+
+        secret = str(params.get("secret", [""])[0] or "").strip()
+        speed = ""
+        tier = 1 if is_web else 3
+        if u.fragment:
+            frag_raw = unquote(u.fragment)
+            m_tier = re.search(r"tier\s*([123])", frag_raw, re.IGNORECASE)
+            if m_tier:
+                tier = int(m_tier.group(1))
+            else:
+                sec_lower = secret.lower()
+                if is_web or (sec_lower.startswith("ee") and len(sec_lower) > 34):
+                    tier = 1
+                elif sec_lower.startswith("dd"):
+                    tier = 2
+                else:
+                    tier = 3
+
+            clean_frag = re.sub(r"^tier\s*[123]\s*\|?", "", frag_raw, flags=re.IGNORECASE).replace("?", "").strip()
+            if clean_frag:
+                speed = clean_frag.replace("MBs", " МБ/с").replace("Mbs", " МБ/с").strip()
+        else:
+            sec_lower = secret.lower()
+            if is_web or (sec_lower.startswith("ee") and len(sec_lower) > 34):
+                tier = 1
+            elif sec_lower.startswith("dd"):
+                tier = 2
+            else:
+                tier = 3
+        return {
+            "host": host,
+            "port": port,
+            "secret": secret,
+            "speed": speed,
+            "tier": tier,
+            "type": "web" if is_web else "mtproto",
+        }
+    except Exception:
+        return None
+
+
+def _parse_proxy_text(raw):
+    """Extract proxy links from plain text, Markdown, HTML, or JSON."""
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8-sig", errors="replace")
+    else:
+        text = str(raw or "").lstrip("\ufeff")
+
+    parsed = []
+
+    # Поддержка JSON-структур (proxies.json из GitVerse / Akres)
+    trimmed = text.strip()
+    if (trimmed.startswith("[") and trimmed.endswith("]")) or (trimmed.startswith("{") and trimmed.endswith("}")):
+        try:
+            data = json.loads(trimmed)
+            entries = data if isinstance(data, list) else data.get("proxies", [])
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                server = str(entry.get("server") or "").strip()
+                if not server:
+                    continue
+                secret = str(entry.get("secret", "") or "").strip()
+                via = entry.get("via")
+                if via:
+                    parsed.append({
+                        "host": server,
+                        "port": 443,
+                        "secret": secret,
+                        "speed": "",
+                        "tier": 1,
+                        "type": "web",
+                        "via": str(via),
+                    })
+                else:
+                    port = int(entry.get("port") or 0)
+                    if 1 <= port <= 65535:
+                        sec_lower = secret.lower()
+                        tier = 1 if (sec_lower.startswith("ee") and len(sec_lower) > 34) else (2 if sec_lower.startswith("dd") else 3)
+                        parsed.append({
+                            "host": server,
+                            "port": port,
+                            "secret": secret,
+                            "speed": "",
+                            "tier": tier,
+                            "type": "mtproto",
+                        })
+            if parsed:
+                return parsed
+        except Exception:
+            pass
+
+    for line in text.splitlines():
+        line = html_lib.unescape(line)
+        links = _PROXY_LINK_RE.findall(line)
+        if not links and (line.strip().lower().startswith("tg://proxy?") or line.strip().lower().startswith("tg://webproxy?")):
+            links = [line.strip()]
+        for link in links:
+            proxy = _parse_proxy(link)
+            if proxy:
+                parsed.append(proxy)
+    return parsed
+
+
+def _proxy_list_size(proxy_list):
+    if proxy_list is None:
+        return None
+    try:
+        return int(proxy_list.size())
+    except Exception:
+        try:
+            return len(proxy_list)
+        except Exception:
+            return None
+
+
+def _get_proxy_controller():
+    """Return ExteraGram's ProxyController singleton when this API is present."""
+    controller_class = None
+    try:
+        controller_class = jclass("com.exteragram.messenger.proxy.ProxyController")
+    except Exception:
+        try:
+            controller_class = _resolve_class("com.exteragram.messenger.proxy.ProxyController")
+        except Exception:
+            controller_class = None
+    if controller_class is None:
+        return None
+
+    try:
+        get_instance = getattr(controller_class, "getInstance", None)
+        if callable(get_instance):
+            instance = get_instance()
+            if instance is not None:
+                return instance
+    except Exception as e:
+        _log(f"ProxyController.getInstance failed: {e}")
+
+    # Older clients may expose proxy APIs as static methods on the class.
+    return controller_class
+
+
+def _get_proxy_list(shared_config, proxy_controller=None):
+    if proxy_controller is not None:
+        try:
+            getter = getattr(proxy_controller, "getProxyList", None)
+            if callable(getter):
+                result = getter()
+                if result is not None:
+                    return result
+        except Exception as e:
+            _log(f"ProxyController.getProxyList failed: {e}")
+    try:
+        return getattr(shared_config, "proxyList", None)
+    except Exception:
+        return None
+
+
+def _get_shared_config_proxy_list(shared_config):
+    """Get the legacy SharedConfig list used by Telegram's native proxy screen."""
+    try:
+        value = getattr(shared_config, "proxyList", None)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+    try:
+        value = get_private_field(shared_config, "proxyList")
+        if value is not None:
+            return value
+    except Exception:
+        pass
     return None
+
+
+def _proxy_list_item(proxy_list, index):
+    try:
+        return proxy_list.get(index)
+    except Exception:
+        try:
+            return proxy_list[index]
+        except Exception:
+            return None
+
+
+def _proxy_item_values(item):
+    """Return (address, port, secret, type) for old and new ProxyInfo models."""
+    settings = None
+    try:
+        settings = get_private_field(item, "settings")
+    except Exception:
+        pass
+    if settings is None:
+        try:
+            settings = getattr(item, "settings", None)
+        except Exception:
+            pass
+
+    if settings is not None:
+        def read_setting(method_name, field_name, default=None):
+            try:
+                method = getattr(settings, method_name, None)
+                if callable(method):
+                    return method()
+            except Exception:
+                pass
+            try:
+                value = get_private_field(settings, field_name)
+                if value is not None:
+                    return value
+            except Exception:
+                pass
+            try:
+                return getattr(settings, field_name, default)
+            except Exception:
+                return default
+
+        try:
+            host = str(read_setting("getAddress", "address", "") or "").strip()
+            port = int(read_setting("getPort", "port", 0) or 0)
+            secret = str(read_setting("getSecret", "secret", "") or "").strip()
+            proxy_type = str(read_setting("getType", "type", "") or "").split(".")[-1].upper()
+            return host, port, secret, proxy_type
+        except Exception:
+            pass
+
+    try:
+        host = str(getattr(item, "address", "") or get_private_field(item, "address") or "").strip()
+        port = int(getattr(item, "port", 0) or get_private_field(item, "port") or 0)
+        secret = str(getattr(item, "secret", "") or get_private_field(item, "secret") or "").strip()
+        try:
+            raw_type = getattr(item, "type", None) or get_private_field(item, "type")
+            proxy_type = str(raw_type or "").split(".")[-1].upper()
+        except Exception:
+            proxy_type = ""
+        if proxy_type not in ("MTPROTO", "SOCKS5", "WEB"):
+            proxy_type = "MTPROTO" if secret else "SOCKS5"
+        return host, port, secret, proxy_type
+    except Exception:
+        return "", 0, "", ""
+
+
+def _clone_proxy_info_wrapper(item):
+    """Re-wrap the current immutable settings in a fresh ProxyInfo instance."""
+    settings = None
+    try:
+        settings = get_private_field(item, "settings")
+    except Exception:
+        pass
+    if settings is None:
+        try:
+            settings = getattr(item, "settings", None)
+        except Exception:
+            pass
+    if settings is None:
+        return item, False, None
+    try:
+        ProxyInfo = jclass("org.telegram.messenger.SharedConfig$ProxyInfo")
+        return ProxyInfo(settings), True, None
+    except Exception as e:
+        return item, False, e
+
+
+def _proxy_list_keys(proxy_list):
+    keys = set()
+    count = _proxy_list_size(proxy_list)
+    if count is None:
+        return keys
+    for index in range(count):
+        item = _proxy_list_item(proxy_list, index)
+        if item is None:
+            continue
+        try:
+            host, port, secret, _proxy_type = _proxy_item_values(item)
+            if host and port:
+                keys.add(_proxy_key(host, port, secret))
+        except Exception:
+            continue
+    return keys
+
+
+
+
+
+
+
+
+
+
+def _sync_shared_list_into_controller(shared_config, proxy_controller):
+    """Import legacy SharedConfig entries into the controller used by the UI."""
+    shared_list = _get_shared_config_proxy_list(shared_config)
+    if shared_list is None:
+        return 0, 0, 0, "SharedConfig.proxyList недоступен", None, None
+    controller_list = _get_proxy_list(shared_config, proxy_controller)
+    if controller_list is None:
+        return 0, 0, 0, "ProxyController.getProxyList недоступен", None, None
+
+    shared_count = _proxy_list_size(shared_list)
+    if shared_count is None:
+        return 0, 0, 0, "не удалось прочитать SharedConfig.proxyList", None, controller_list
+    initial_keys = _proxy_list_keys(controller_list)
+    shared_keys = _proxy_list_keys(shared_list)
+    duplicate_count = len(initial_keys & shared_keys)
+    missing_keys = shared_keys - initial_keys
+    if not missing_keys:
+        return 0, duplicate_count, 0, None, None, controller_list
+
+    try:
+        add_proxy = getattr(proxy_controller, "addProxy", None)
+    except Exception as e:
+        return 0, duplicate_count, len(missing_keys), f"не удалось получить ProxyController.addProxy: {e}", None, controller_list
+    if not callable(add_proxy):
+        return 0, duplicate_count, len(missing_keys), "ProxyController.addProxy недоступен", None, controller_list
+
+    try:
+        ProxyInfo = jclass("org.telegram.messenger.SharedConfig$ProxyInfo")
+    except Exception:
+        ProxyInfo = None
+    add_errors = []
+    wrapper_errors = []
+    for index in range(shared_count):
+        item = _proxy_list_item(shared_list, index)
+        if item is None:
+            continue
+        try:
+            host, port, secret, proxy_type = _proxy_item_values(item)
+            if not host or not port:
+                continue
+            key = _proxy_key(host, port, secret)
+            if key not in missing_keys:
+                continue
+
+            controller_item = item
+            rebuild_error = None
+            # Rebuild MTProto rows with the same fresh ProxySettings path used
+            # by source imports instead of passing legacy wrappers directly.
+            if proxy_type == "MTPROTO" and ProxyInfo is not None:
+                try:
+                    controller_item = _make_proxy_info(
+                        ProxyInfo, {"host": host, "port": port, "secret": secret}
+                    )
+                except Exception as e:
+                    rebuild_error = e
+                    controller_item, _rewrapped, wrapper_error = _clone_proxy_info_wrapper(item)
+                    if wrapper_error:
+                        wrapper_errors.append(
+                            f"{host}:{port} ProxyInfo rewrap {type(wrapper_error).__name__}: {str(wrapper_error)[:80]}"
+                        )
+            else:
+                controller_item, _rewrapped, wrapper_error = _clone_proxy_info_wrapper(item)
+                if wrapper_error:
+                    wrapper_errors.append(
+                        f"{host}:{port} ProxyInfo rewrap {type(wrapper_error).__name__}: {str(wrapper_error)[:80]}"
+                    )
+            try:
+                add_proxy(controller_item)
+            except Exception as e:
+                reason = f"{type(e).__name__}: {str(e)[:100]}"
+                if rebuild_error:
+                    reason += f"; fresh ProxyInfo failed: {type(rebuild_error).__name__}: {str(rebuild_error)[:80]}"
+                add_errors.append(f"{host}:{port} {reason}")
+        except Exception as e:
+            host, port, _secret, _proxy_type = _proxy_item_values(item)
+            add_errors.append(f"{host}:{port} {type(e).__name__}: {str(e)[:100]}")
+
+    refreshed_list = _get_proxy_list(shared_config, proxy_controller)
+    if refreshed_list is not None:
+        controller_list = refreshed_list
+    final_keys = _proxy_list_keys(controller_list)
+    added_keys = (final_keys - initial_keys) & shared_keys
+    still_missing = shared_keys - final_keys
+    failed = len(still_missing)
+    detail_errors = wrapper_errors + add_errors
+    sync_error = "; ".join(detail_errors[:3]) if detail_errors else None
+    if failed:
+        missing_text = f"После addProxy не появилось записей: {failed}"
+        sync_error = f"{sync_error}; {missing_text}" if sync_error else missing_text
+
+    save_error = None
+    if added_keys:
+        try:
+            save_proxy_list = getattr(proxy_controller, "saveProxyList", None)
+            if callable(save_proxy_list):
+                save_proxy_list()
+        except Exception as e:
+            save_error = RuntimeError(f"ProxyController.saveProxyList: {type(e).__name__}: {str(e)[:160]}")
+
+    return len(added_keys), duplicate_count, failed, sync_error, save_error, controller_list
+
+
+def _merge_proxy_lists(*proxy_lists):
+    """Return a de-duplicated union, preserving list priority/order."""
+    merged = []
+    keys = set()
+    for proxy_list in proxy_lists:
+        count = _proxy_list_size(proxy_list)
+        if count is None:
+            continue
+        for index in range(count):
+            item = _proxy_list_item(proxy_list, index)
+            if item is None:
+                continue
+            try:
+                host, port, secret, _proxy_type = _proxy_item_values(item)
+                if not host or not port:
+                    continue
+                key = _proxy_key(host, port, secret)
+                if key in keys:
+                    continue
+                keys.add(key)
+                merged.append(item)
+            except Exception:
+                continue
+    return merged
+
+
+def _proxy_remove_candidates(proxy_controller):
+    """Find supported, typed Controller removal methods without invoking them."""
+    candidates = []
+    signatures = []
+    try:
+        current = proxy_controller.getClass()
+        Modifier = jclass("java.lang.reflect.Modifier")
+        depth = 0
+        while current is not None and depth < 5:
+            for method in current.getDeclaredMethods():
+                name = str(method.getName())
+                if name.startswith("-$$Nest") or not any(token in name.lower() for token in ("remove", "delete")):
+                    continue
+                params = method.getParameterTypes()
+                param_names = [str(p.getName()) for p in params]
+                signatures.append(f"{name}({', '.join(param_names)})")
+                if bool(Modifier.isStatic(method.getModifiers())) or len(params) != 1:
+                    continue
+                param_name = param_names[0]
+                if param_name.endswith("ProxyInfo"):
+                    argument_kind = "item"
+                elif param_name in ("int", "java.lang.Integer"):
+                    argument_kind = "index"
+                else:
+                    continue
+                bound_method = getattr(proxy_controller, name, None)
+                if callable(bound_method):
+                    candidate = (name, argument_kind, bound_method)
+                    if not any(existing[0] == name and existing[1] == argument_kind for existing in candidates):
+                        candidates.append(candidate)
+            current = current.getSuperclass()
+            depth += 1
+    except Exception as e:
+        signatures.append(f"reflection_error={type(e).__name__}")
+    return candidates, signatures
+
+
+def _proxy_index_for_key(proxy_list, wanted_key):
+    count = _proxy_list_size(proxy_list)
+    if count is None:
+        return -1
+    for index in range(count):
+        item = _proxy_list_item(proxy_list, index)
+        if item is None:
+            continue
+        try:
+            host, port, secret, _proxy_type = _proxy_item_values(item)
+            if host and port and _proxy_key(host, port, secret) == wanted_key:
+                return index
+        except Exception:
+            continue
+    return -1
+
+
+def _invoke_proxy_remove(proxy_controller, shared_config, item, index, key, candidates):
+    """Invoke a discovered remove API and verify the Controller list changed."""
+    errors = []
+    for name, argument_kind, method in candidates:
+        current_list = _get_proxy_list(shared_config, proxy_controller)
+        current_index = _proxy_index_for_key(current_list, key)
+        if current_index < 0:
+            return True, name, errors
+        current_item = _proxy_list_item(current_list, current_index)
+        argument = current_item if argument_kind == "item" else int(current_index)
+        try:
+            method(argument)
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}")
+        current_list = _get_proxy_list(shared_config, proxy_controller)
+        if key not in _proxy_list_keys(current_list):
+            return True, name, errors
+    return False, None, errors
+
+
+def _remove_keys_from_java_list(proxy_list, keys):
+    """Remove matching legacy mirror entries by object, returning failures safely."""
+    if proxy_list is None or not keys:
+        return 0, set(), []
+    removed = 0
+    errors = []
+    count = _proxy_list_size(proxy_list)
+    if count is None:
+        return 0, set(keys), ["list size unavailable"]
+    for index in range(count - 1, -1, -1):
+        item = _proxy_list_item(proxy_list, index)
+        if item is None:
+            continue
+        try:
+            host, port, secret, _proxy_type = _proxy_item_values(item)
+            key = _proxy_key(host, port, secret) if host and port else None
+            if key not in keys:
+                continue
+            remove = getattr(proxy_list, "remove", None)
+            if not callable(remove):
+                errors.append("list.remove unavailable")
+                break
+            before_size = _proxy_list_size(proxy_list)
+            remove(item)
+            after_size = _proxy_list_size(proxy_list)
+            if before_size is not None and after_size is not None and after_size < before_size:
+                removed += 1
+            else:
+                errors.append(f"entry {index} remained after list.remove")
+        except Exception as e:
+            errors.append(f"entry {index}: {type(e).__name__}")
+    remaining = _proxy_list_keys(proxy_list) & keys
+    return removed, remaining, errors
+
+
+def _make_proxy_info(proxy_info_class, proxy):
+    """Build ProxyInfo using the app's current ProxySettings model or legacy APIs."""
+    host = str(proxy["host"])
+    port = int(proxy.get("port") or 443)
+    secret = str(proxy.get("secret", "") or "")
+    proxy_type = str(proxy.get("type", "mtproto")).lower()
+    settings_error = None
+
+    # 1. Современный прямой путь Telegram (AyuGram, exteraGram): ProxySettings.fromUri
+    try:
+        ProxySettings = jclass("org.telegram.utils.proxy.ProxySettings")
+        Uri = jclass("android.net.Uri")
+        if proxy_type == "web":
+            uri_str = f"tg://webproxy?server={host}&secret={secret}"
+        else:
+            uri_str = f"tg://proxy?server={host}&port={port}&secret={secret}"
+        ps = ProxySettings.fromUri(Uri.parse(uri_str))
+        if ps is not None:
+            return proxy_info_class(ps)
+    except Exception as e:
+        _log(f"ProxySettings.fromUri path failed ({host}): {e}")
+
+    # 2. Путь через Builder ProxySettings
+    try:
+        ProxySettings = jclass("org.telegram.utils.proxy.ProxySettings")
+        ProxyType = jclass("org.telegram.utils.proxy.ProxySettings$Type")
+        builder = ProxySettings.builder()
+        if proxy_type == "web" and hasattr(ProxyType, "WEB"):
+            builder.setType(getattr(ProxyType, "WEB"))
+        else:
+            builder.setType(getattr(ProxyType, "MTPROTO", None) or ProxyType.MTPROTO)
+        builder.setAddress(host)
+        builder.setPort(port)
+        builder.setSecret(secret)
+        settings = builder.build()
+        return proxy_info_class(settings)
+    except Exception as e:
+        settings_error = e
+        _log(f"ProxySettings constructor path failed: {e}")
+
+    # 3. Older Telegram builds use either the traditional five-argument
+    # constructor or a no-argument ProxyInfo with public fields.
+    try:
+        return proxy_info_class(host, port, "", "", secret)
+    except Exception as legacy_error:
+        try:
+            info = proxy_info_class()
+            info.address = host
+            info.port = port
+            info.secret = secret
+            return info
+        except Exception as no_arg_error:
+            diagnostics = _proxy_api_diagnostics()
+            raise RuntimeError(
+                f"ProxySettings path: {settings_error}; legacy constructor: {legacy_error}; "
+                f"no-arg constructor: {no_arg_error}; доступный API: {diagnostics}"
+            )
+        values = {
+            "address": host,
+            "port": port,
+            "username": "",
+            "password": "",
+            "secret": secret,
+        }
+        for name, value in values.items():
+            try:
+                setattr(info, name, value)
+                continue
+            except Exception:
+                pass
+            try:
+                if set_private_field(info, name, value):
+                    continue
+            except Exception:
+                pass
+            if name in ("address", "port", "secret"):
+                raise RuntimeError(f"Не удалось установить поле ProxyInfo.{name}")
+        return info
+
+
+def _persist_proxy_list(shared_config, add_api_used, controller_api_used=False, direct_list_add_used=False, proxy_controller=None):
+    """Persist through the owner of the list that was actually changed."""
+    if controller_api_used and not direct_list_add_used:
+        try:
+            method = getattr(proxy_controller, "saveProxyList", None) if proxy_controller is not None else None
+            if callable(method):
+                method()
+        except Exception as e:
+            return RuntimeError(f"ProxyController.saveProxyList: {type(e).__name__}: {str(e)[:160]}")
+        # Some older controller builds persist inside addProxy and expose no saver.
+        return None
+    errors = []
+    for name in ("saveProxyList", "saveProxySettings", "saveProxies", "saveConfig"):
+        try:
+            method = getattr(shared_config, name, None)
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            continue
+        if not callable(method):
+            continue
+        try:
+            method()
+            return None
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+
+    # In some client versions addProxy itself updates persistent storage, and
+    # there is deliberately no separate saveProxyList method.
+    if add_api_used:
+        return None
+    if errors:
+        return RuntimeError("; ".join(errors)[:240])
+    return RuntimeError("Нет доступного метода сохранения списка прокси")
+
 
 def _apply_icon(cell, tv_name, icon_name):
     try:
         tv = get_private_field(cell, tv_name)
         ctx = cell.getContext()
         res_id = ctx.getResources().getIdentifier(icon_name, "drawable", ctx.getPackageName())
-        if not tv or not res_id: return
+        if not tv or not res_id:
+            return
         Theme = jclass("org.telegram.ui.ActionBar.Theme")
         drawable = ctx.getResources().getDrawable(res_id).mutate()
         drawable.setColorFilter(jclass("android.graphics.PorterDuffColorFilter")(
@@ -66,7 +1008,9 @@ def _apply_icon(cell, tv_name, icon_name):
         is_rtl = jclass("org.telegram.messenger.LocaleController").isRTL
         tv.setCompoundDrawablesWithIntrinsicBounds(None, None, drawable, None) if is_rtl else tv.setCompoundDrawablesWithIntrinsicBounds(drawable, None, None, None)
         tv.setCompoundDrawablePadding(jclass("org.telegram.messenger.AndroidUtilities").dp(16))
-    except: pass
+    except Exception:
+        pass
+
 
 def _unwrap_class(cls_obj):
     if cls_obj is None:
@@ -86,6 +1030,7 @@ def _unwrap_class(cls_obj):
             pass
     return cls_obj
 
+
 def _resolve_class(name):
     cls = None
     try:
@@ -104,338 +1049,1460 @@ def _resolve_class(name):
             pass
     return _unwrap_class(cls)
 
+
+def _proxy_api_diagnostics():
+    """Return concise constructor/field/method signatures for compatibility logs."""
+    class_names = (
+        "org.telegram.messenger.SharedConfig$ProxyInfo",
+        "com.exteragram.messenger.proxy.ProxyController$ProxyInfo",
+        "com.exteragram.messenger.proxy.ProxyInfo",
+        "org.telegram.messenger.SharedConfig",
+        "com.exteragram.messenger.proxy.ProxyController",
+    )
+    lines = []
+    for class_name in class_names:
+        try:
+            cls = _resolve_class(class_name)
+            if cls is None:
+                continue
+            try:
+                resolved_name = str(cls.getName())
+            except Exception:
+                resolved_name = class_name
+            lines.append(resolved_name + ":")
+
+            if "ProxyInfo" in class_name:
+                try:
+                    signatures = []
+                    for ctor in cls.getDeclaredConstructors():
+                        params = [str(param.getName()) for param in ctor.getParameterTypes()]
+                        signatures.append("(" + ", ".join(params) + ")")
+                    lines.append("  constructors=" + (", ".join(signatures) or "<none>"))
+                except Exception as e:
+                    lines.append(f"  constructors=<error {type(e).__name__}: {e}>")
+                try:
+                    fields = []
+                    for field in cls.getDeclaredFields():
+                        fields.append(f"{field.getName()}:{field.getType().getName()}")
+                    if fields:
+                        lines.append("  fields=" + ", ".join(fields[:20]))
+                except Exception:
+                    pass
+            else:
+                try:
+                    methods = []
+                    for method in cls.getDeclaredMethods():
+                        method_name = str(method.getName())
+                        if "proxy" not in method_name.lower() and "save" not in method_name.lower():
+                            continue
+                        params = [str(param.getName()) for param in method.getParameterTypes()]
+                        methods.append(f"{method_name}({', '.join(params)})")
+                    if methods:
+                        lines.append("  methods=" + ", ".join(methods[:30]))
+                except Exception as e:
+                    lines.append(f"  methods=<error {type(e).__name__}: {e}>")
+        except Exception as e:
+            _log(f"Proxy API reflection failed for {class_name}: {e}")
+    return "\n".join(lines)[:1100] or "Java proxy classes were not introspectable"
+
+
 class ProxyManagerPlugin(BasePlugin):
     def on_plugin_load(self):
-        self._speed_cache = {}
-        self._load_speed_cache()
-        plugin = self
-
-        # ── Быстрое действие на кнопке поиска и в боковом меню ──
         try:
-            self.add_menu_item(MenuItemData(
-                menu_type=MenuItemType.MAIN_MENU,
-                text="Скорость текущего прокси",
-                on_click=self._on_check_current_proxy_speed,
-                icon="msg2_speed",
-                priority=100,
-            ))
-        except Exception as e:
-            log(f"[GoodProxy] add MAIN_MENU item error: {e}")
+            self._cleanup_busy = False
+            self._onboarding_dialog_open = False
+            plugin = self
 
-        try:
-            self.add_menu_item(MenuItemData(
-                menu_type=MenuItemType.DRAWER_MENU,
-                text="Скорость текущего прокси",
-                on_click=self._on_check_current_proxy_speed,
-                icon="msg2_speed",
-                priority=100,
-            ))
-        except Exception as e:
-            log(f"[GoodProxy] add DRAWER_MENU item error: {e}")
+            _log(f"Plugin v{__version__} loading...")
 
-        # ── Хуки на активность списка прокси ──
-        ActivityCls = _resolve_class("org.telegram.ui.ProxyListActivity")
-        if not ActivityCls:
-            return log("[GoodProxy] ProxyListActivity not found")
+            # -- Автоматическое скрытие спонсора прокси во всех условиях --
+            self._install_proxy_sponsor_hider()
 
-        # Кнопка обновления в верхнем меню (ActionBar)
-        class ActionBarHook(MethodHook):
-            def after_hooked_method(self, param):
-                act = param.thisObject
-                try:
-                    ab = get_private_field(act, "actionBar")
-                    if not ab: return
-                    menu = ab.createMenu()
-                    MENU_IMPORT_ID = 999_888
-                    if menu.getItem(MENU_IMPORT_ID) is None:
-                        ctx = act.getParentActivity() or getattr(act, "getContext", lambda: None)()
-                        if ctx:
-                            res_id = ctx.getResources().getIdentifier("msg_download", "drawable", ctx.getPackageName())
-                            iw = jclass("org.telegram.messenger.AndroidUtilities").dp(40)
-                            it = menu.addItemWithWidth(MENU_IMPORT_ID, res_id, iw, "Обновить Good Proxy")
-                            it.setOnClickListener(OnClickListener(lambda _v: plugin._fetch_proxies()))
-                except Exception as e:
-                    log(f"[GoodProxy] actionBar add error: {e}")
+            # -- Хуки на активность списка прокси --
+            ActivityCls = _resolve_class("org.telegram.ui.ProxyListActivity")
+            if not ActivityCls:
+                _log("ProxyListActivity not found")
+                return
 
-        # Хук клика на элементы списка (если добавлены кнопки внизу)
-        class ClickHook(MethodHook):
-            def after_hooked_method(self, param):
-                act = param.thisObject
-                try:
-                    lv = get_private_field(act, "listView")
-                    old_l = get_private_field(lv, "onItemClickListener")
-                    if old_l and "PMClickListener" in str(old_l.getClass().getName()): return
-                    class PMClickListener(dynamic_proxy(jclass("org.telegram.ui.Components.RecyclerListView$OnItemClickListener"))):
-                        def __init__(self): super().__init__()
-                        def onItemClick(self, view, pos):
-                            orig = int(get_private_field(act, "rowCount"))
-                            if pos < orig: return old_l.onItemClick(view, pos) if old_l else None
-                            if pos - orig == 1: plugin._fetch_proxies()
-                            elif pos - orig == 2: plugin._export_proxies()
-                    lv.setOnItemClickListener(PMClickListener())
-                except Exception: pass
-
-        for m in ActivityCls.getDeclaredMethods():
-            if m.getName() == "createView":
-                self.hook_method(m, ActionBarHook())
-                self.hook_method(m, ClickHook())
-
-        # Хуки на адаптер (кнопки внизу списка)
-        AdapterCls = _resolve_class("org.telegram.ui.ProxyListActivity$ListAdapter")
-        if AdapterCls:
-            def _get_orig_count(param):
-                act = get_private_field(param.thisObject, "this$0")
-                return int(get_private_field(act, "rowCount")) if act else None
-
-            class CountHook(MethodHook):
+            # Кнопка обновления в верхнем меню (ActionBar)
+            class ActionBarHook(MethodHook):
                 def after_hooked_method(self, param):
-                    param.setResult(Integer(int(param.getResult()) + 3))
-
-            class ViewTypeHook(MethodHook):
-                def before_hooked_method(self, param):
-                    if (orig := _get_orig_count(param)) is not None and (pos := int(param.args[0])) >= orig:
-                        param.setResult(Integer(0 if pos - orig == 0 else 1))
-
-            class BindHook(MethodHook):
-                def before_hooked_method(self, param):
-                    if (orig := _get_orig_count(param)) is not None and int(param.args[1]) >= orig:
-                        param.setResult(None)
-                def after_hooked_method(self, param):
-                    if (orig := _get_orig_count(param)) is None or (pos := int(param.args[1])) < orig: return
-                    cell, cpos = param.args[0].itemView, pos - orig
+                    act = param.thisObject
                     try:
-                        if cpos == 1:
-                            cell.setText("Получить новый список", True)
-                            _apply_icon(cell, "textView", "msg_download")
-                        elif cpos == 2:
-                            cell.setText("Экспортировать прокси", False)
-                            _apply_icon(cell, "textView", "msg_share")
-                    except Exception: pass
+                        ab = get_private_field(act, "actionBar")
+                        if not ab:
+                            return
+                        menu = ab.createMenu()
+                        MENU_IMPORT_ID = 999_888
+                        if menu.getItem(MENU_IMPORT_ID) is None:
+                            ctx = act.getParentActivity() or getattr(act, "getContext", lambda: None)()
+                            if ctx:
+                                res_id = ctx.getResources().getIdentifier("msg_download", "drawable", ctx.getPackageName())
+                                iw = jclass("org.telegram.messenger.AndroidUtilities").dp(40)
+                                it = menu.addItemWithWidth(MENU_IMPORT_ID, res_id, iw, "Обновить Good Proxy")
+                                it.setOnClickListener(OnClickListener(lambda _v: plugin._fetch_proxies()))
+                    except Exception as e:
+                        _log(f"actionBar add error: {e}")
 
-            for m in AdapterCls.getDeclaredMethods():
-                if m.getName() == "getItemCount": self.hook_method(m, CountHook())
-                elif m.getName() == "getItemViewType": self.hook_method(m, ViewTypeHook())
-                elif m.getName() == "onBindViewHolder" and len(m.getParameterTypes()) == 2: self.hook_method(m, BindHook())
+            # Хук клика на элементы списка (кнопки внизу)
+            class ClickHook(MethodHook):
+                def after_hooked_method(self, param):
+                    act = param.thisObject
+                    try:
+                        lv = get_private_field(act, "listView")
+                        old_l = get_private_field(lv, "onItemClickListener")
+                        if old_l and "PMClickListener" in str(old_l.getClass().getName()):
+                            return
 
-    def _on_check_current_proxy_speed(self, context=None):
-        BulletinHelper.show_info("Замеряем скорость прокси (тест 1 МБ)…")
-        run_on_queue(self._do_check_current_speed, PLUGINS_QUEUE)
+                        class PMClickListener(dynamic_proxy(jclass("org.telegram.ui.Components.RecyclerListView$OnItemClickListener"))):
+                            def __init__(self):
+                                super().__init__()
 
-    def _do_check_current_speed(self):
-        try:
-            SC = _shared_config()
-            is_enabled = getattr(SC, "proxyEnabled", False) or (hasattr(SC, "isProxyEnabled") and SC.isProxyEnabled())
-            if not is_enabled:
-                return run_on_ui_thread(lambda: BulletinHelper.show_info("Прокси сейчас отключен."))
+                            def onItemClick(self, view, pos):
+                                orig = int(get_private_field(act, "rowCount") or 0)
+                                if pos < orig:
+                                    return old_l.onItemClick(view, pos) if old_l else None
+                                if pos - orig == 1:
+                                    plugin._fetch_proxies()
+                                elif pos - orig == 2:
+                                    plugin._export_proxies()
+                                elif pos - orig == 3:
+                                    plugin._on_cleanup_nonworking_click()
 
-            cp = getattr(SC, "currentProxy", None)
-            if not cp:
-                return run_on_ui_thread(lambda: BulletinHelper.show_info("Нет активного прокси."))
+                        lv.setOnItemClickListener(PMClickListener())
+                    except Exception:
+                        pass
 
-            host = str(getattr(cp, "address", ""))
-            port = int(getattr(cp, "port", 0))
+            for m in ActivityCls.getDeclaredMethods():
+                if m.getName() == "createView":
+                    self.hook_method(m, ActionBarHook())
+                    self.hook_method(m, ClickHook())
 
-            if not host or not port:
-                return run_on_ui_thread(lambda: BulletinHelper.show_error("Неверные параметры прокси."))
+            # Хуки на адаптер (кнопки внизу списка)
+            AdapterCls = _resolve_class("org.telegram.ui.ProxyListActivity$ListAdapter")
+            if AdapterCls:
+                def _get_orig_count(param):
+                    act = get_private_field(param.thisObject, "this$0")
+                    return int(get_private_field(act, "rowCount") or 0) if act else None
 
-            # 1. Быстрый сокетный замер пинга (RTT)
-            ping_ms = -1
+                class CountHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        param.setResult(Integer(int(param.getResult()) + 4))
+
+                class ViewTypeHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        if (orig := _get_orig_count(param)) is not None and (pos := int(param.args[0])) >= orig:
+                            param.setResult(Integer(0 if pos - orig == 0 else 1))
+
+                class BindHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        if (orig := _get_orig_count(param)) is not None and int(param.args[1]) >= orig:
+                            param.setResult(None)
+
+                    def after_hooked_method(self, param):
+                        if (orig := _get_orig_count(param)) is None or (pos := int(param.args[1])) < orig:
+                            return
+                        cell, cpos = param.args[0].itemView, pos - orig
+                        try:
+                            if cpos == 1:
+                                cell.setText("Получить новый список", True)
+                                _apply_icon(cell, "textView", "msg_download")
+                            elif cpos == 2:
+                                cell.setText("Экспортировать прокси", False)
+                                _apply_icon(cell, "textView", "msg_share")
+                            elif cpos == 3:
+                                cell.setText("Проверить и удалить нерабочие", False)
+                                _apply_icon(cell, "textView", "msg_delete")
+                        except Exception:
+                            pass
+
+                for m in AdapterCls.getDeclaredMethods():
+                    if m.getName() == "getItemCount":
+                        self.hook_method(m, CountHook())
+                    elif m.getName() == "getItemViewType":
+                        self.hook_method(m, ViewTypeHook())
+                    elif m.getName() == "onBindViewHolder" and len(m.getParameterTypes()) == 2:
+                        self.hook_method(m, BindHook())
+
+            _log(f"Plugin v{__version__} loaded successfully")
             try:
-                t0 = time.monotonic()
-                sock = socket.create_connection((host, port), timeout=3)
-                ping_ms = int((time.monotonic() - t0) * 1000)
-                sock.close()
+                threading.Timer(6.0, lambda: self._check_plugin_update(manual=False)).start()
+            except Exception as e:
+                _log(f"auto-update timer error: {e}")
+        except Exception as e:
+            _log(f"on_plugin_load error: {e}")
+            _notify("error", f"Не удалось полностью запустить Good Proxy: {type(e).__name__}.\n{str(e)[:350]}")
+
+    def _install_proxy_sponsor_hider(self):
+        """Блокировка поиска и запроса спонсорских каналов прокси."""
+        try:
+            MessagesControllerCls = _resolve_class("org.telegram.messenger.MessagesController")
+            if not MessagesControllerCls:
+                return
+
+            class PromoHook(MethodHook):
+                def before_hooked_method(self, param):
+                    param.setResult(None)
+
+            hook = PromoHook()
+            for m in MessagesControllerCls.getDeclaredMethods():
+                if m.getName() == "checkPromoInfo":
+                    try:
+                        self.hook_method(m, hook)
+                    except Exception as e:
+                        _log(f"hook checkPromoInfo error: {e}")
+        except Exception as e:
+            _log(f"sponsor hider error: {e}")
+
+    def _on_show_guide_click(self, _view=None):
+        guide_text = (
+            "Добро пожаловать в Good Proxy!\n\n"
+            "Плагин обеспечивает автоматический сбор, обновление и проверку стабильных MTProto-прокси прямо внутри Telegram.\n\n"
+            "Основные функции:\n"
+            "1. Автообновление списка:\n"
+            "Нажмите кнопку скачивания в правом верхнем углу списка прокси (или пункт «Получить новый список» внизу), чтобы загрузить актуальный рабочий пул.\n\n"
+            "2. Скрытие спонсоров:\n"
+            "Спонсорские каналы блокируются автоматически на этапе сетевого запроса — реклама в списке чатов никогда не отображается.\n\n"
+            "3. Очистка нерабочих серверов:\n"
+            "Кнопка «Проверить и удалить нерабочие» в один клик убирает недоступные узлы из списка штатным MTProto-чекером.\n\n"
+            "4. Экспорт:\n"
+            "Кнопка «Экспортировать прокси» копирует весь активный пул в буфер обмена для переноса на другие устройства.\n\n"
+            "5. Тест скорости:\n"
+            "Для точного замера реальной скорости скачивания и записи скорости в названия прокси установите отдельный плагин Good Proxy Speed."
+        )
+        run_on_ui_thread(lambda: _show_modal_alert("Инструкция Good Proxy", guide_text, "Понятно"))
+
+    def create_settings(self) -> list:
+        """Build settings defensively so one unavailable row cannot hide the page."""
+        try:
+            from ui.settings import Divider, Header, Selector, Switch, Text
+        except Exception as e:
+            _log(f"create_settings: ui.settings unavailable: {e}")
+            return []
+
+        rows = []
+
+        # --- Секция 1: Импорт прокси ---
+        try:
+            rows.append(Header(text="Импорт прокси"))
+            try:
+                rows.append(Selector(
+                    key="import_tier_mode",
+                    text="Категория при импорте",
+                    default=0,
+                    items=[
+                        "Спрашивать при импорте",
+                        "Все (Tier 1, 2, 3)",
+                        "Только Tier 1 (FakeTLS)",
+                        "Только Tier 2 (TLS / random-pad)",
+                        "Только Tier 3 (Стандартный MTProto)",
+                    ],
+                    icon="msg_download",
+                ))
+            except Exception as e:
+                _log(f"create_settings Selector error: {e}")
+
+            try:
+                rows.append(Switch(
+                    key="use_ghproxy",
+                    text="Зеркало ghproxy.net",
+                    default=True,
+                    subtext="Обход сетевых блокировок GitHub в РФ.",
+                    icon="msg_link",
+                ))
+            except Exception as e:
+                _log(f"create_settings use_ghproxy error: {e}")
+
+            try:
+                rows.append(Switch(
+                    key="auto_update_plugin",
+                    text="Автообновление плагина",
+                    default=True,
+                    subtext="Проверять обновления плагина на GitHub при старте.",
+                    icon="msg_retry",
+                ))
+            except Exception as e:
+                _log(f"create_settings auto_update_plugin error: {e}")
+        except Exception as e:
+            _log(f"create_settings import section error: {e}")
+
+        # --- Секция: Фильтрация протоколов ---
+        try:
+            try:
+                rows.append(Divider(text="Выберите разрешенные типы и протоколы прокси для импорта."))
             except Exception:
                 pass
+            rows.append(Header(text="Протоколы MTProto"))
+            rows.append(Switch(key="proto_faketls", text="FakeTLS", default=True))
+            rows.append(Switch(key="proto_padding", text="Padding", default=True))
+            rows.append(Header(text="Протоколы WebProxy"))
+            rows.append(Switch(key="proto_websocket", text="WebSocket", default=True))
+            rows.append(Switch(key="proto_websocket_lanes", text="WebSocket-Lanes", default=True))
+            rows.append(Switch(key="proto_https", text="HTTPS", default=True))
+            rows.append(Switch(key="proto_https_lanes", text="HTTPS-Lanes", default=True))
+        except Exception as e:
+            _log(f"create_settings protocol filters error: {e}")
 
-            # 2. Живой замер скорости скачивания через MTProto (пакетный тест ~1 МБ)
-            speed_str = None
+        # --- Секция 2: Замер скорости ---
+        try:
             try:
-                UserConfig = jclass("org.telegram.messenger.UserConfig")
-                ConnectionsManager = jclass("org.telegram.tgnet.ConnectionsManager")
-                TLRPC = jclass("org.telegram.tgnet.TLRPC")
-                RequestDelegate = jclass("org.telegram.tgnet.RequestDelegate")
-
-                cm = ConnectionsManager.getInstance(UserConfig.selectedAccount)
-
-                target_count = 12  # 12 * ~85 КБ ≈ 1.02 МБ
-                completed = [0]
-                total_bytes = [0]
-                done_event = threading.Event()
-                lock = threading.Lock()
-                t_start = time.monotonic()
-
-                class BatchSpeedDelegate(dynamic_proxy(RequestDelegate)):
-                    def run(self, response, error):
-                        with lock:
-                            if response is not None:
-                                try:
-                                    sz = len(response.serialize())
-                                except Exception:
-                                    sz = 85000
-                                total_bytes[0] += sz
-                            completed[0] += 1
-                            if completed[0] >= target_count:
-                                done_event.set()
-
-                del_inst = BatchSpeedDelegate()
-                for _ in range(target_count):
-                    cm.sendRequest(TLRPC.TL_help_getCountriesList(), del_inst, 2)
-
-                # Ожидание загрузки 1 МБ данных (до 8 секунд)
-                done_event.wait(timeout=8.0)
-
-                elapsed = max(0.001, time.monotonic() - t_start)
-                if total_bytes[0] >= 100000:
-                    kbs = (total_bytes[0] / 1024.0) / elapsed
-                    if kbs >= 1024:
-                        speed_str = f"{kbs / 1024.0:.2f} МБ/с"
-                    else:
-                        speed_str = f"{kbs:.0f} КБ/с"
-            except Exception as e:
-                log(f"[GoodProxy] CM 1MB speed test err: {e}")
-
-            if speed_str:
-                ping_part = f"Пинг: {ping_ms} мс · " if ping_ms > 0 else ""
-                res = f"⚡ Скорость: {speed_str} (1 МБ)\n{ping_part}{host}:{port}"
-                return run_on_ui_thread(lambda: BulletinHelper.show_success(res))
-
-            # Фолбэк на кэшированную скорость или пинг
-            cached_speed = self._get_proxy_speed(host, port)
-            if cached_speed:
-                ping_part = f"Пинг: {ping_ms} мс · " if ping_ms > 0 else ""
-                res = f"⚡ Скорость: {cached_speed}\n{ping_part}{host}:{port}"
-                return run_on_ui_thread(lambda: BulletinHelper.show_success(res))
-
-            if ping_ms > 0:
-                res = f"⚡ Пинг: {ping_ms} мс\n{host}:{port} (онлайн)"
-                return run_on_ui_thread(lambda: BulletinHelper.show_success(res))
-
-            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Прокси {host}:{port} не отвечает."))
+                rows.append(Divider())
+            except Exception:
+                pass
+            rows.append(Header(text="Замер скорости"))
+            rows.append(Text(
+                text="Скачать плагин для замера скорости",
+                subtext="Установить Good Proxy Speed для измерения скорости и TCP Warmup.",
+                icon="msg2_speed",
+                on_click=self._on_download_speed_plugin_click,
+            ))
         except Exception as e:
-            log(f"[GoodProxy] check speed error: {e}")
-            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Сбой замера: {e}"))
+            _log(f"create_settings speed section error: {e}")
 
-    def _get_cache_dir(self):
+        # --- Секция 3: Справка и диагностика ---
         try:
-            from file_utils import get_plugins_dir
-            p_dir = get_plugins_dir()
-            if p_dir: return str(p_dir)
-        except Exception: pass
-        try:
-            ctx = jclass("org.telegram.messenger.ApplicationLoader").applicationContext
-            if ctx: return str(ctx.getFilesDir().getAbsolutePath())
-        except Exception: pass
-        return "."
-
-    def _load_speed_cache(self):
-        try:
-            cache_file = os.path.join(self._get_cache_dir(), "good_proxy_speeds.json")
-            if os.path.exists(cache_file):
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    self._speed_cache = json.load(f)
-                    return
+            try:
+                rows.append(Divider())
+            except Exception:
+                pass
+            rows.append(Header(text="Справка и диагностика"))
+            rows.append(Text(
+                text="Инструкция",
+                subtext="Пошаговое описание всех функций и кнопок плагина.",
+                icon="msg_info",
+                on_click=self._on_show_guide_click,
+            ))
+            rows.append(Text(
+                text="Пинг источников",
+                subtext="Проверка доступности репозиториев и зеркал.",
+                icon="msg_link",
+                on_click=self._on_test_sources_click,
+            ))
+            rows.append(Text(
+                text="Проверить обновление плагина",
+                subtext=f"Текущая версия Good Proxy: v{__version__}",
+                icon="msg_retry",
+                on_click=self._on_check_update_click,
+            ))
         except Exception as e:
-            log(f"[GoodProxy] load cache error: {e}")
-        self._speed_cache = getattr(self, "_speed_cache", {})
+            _log(f"create_settings help section error: {e}")
 
-    def _save_speed_cache(self):
-        try:
-            cache_file = os.path.join(self._get_cache_dir(), "good_proxy_speeds.json")
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(self._speed_cache, f, ensure_ascii=False)
-        except Exception as e:
-            log(f"[GoodProxy] save cache error: {e}")
+        return rows
 
-    def _get_proxy_speed(self, host, port):
-        if not hasattr(self, "_speed_cache") or not self._speed_cache:
-            self._load_speed_cache()
-        sp = self._speed_cache.get(f"{host}:{port}")
-        if sp: return sp
-        return self._speed_cache.get(str(host), "")
+    def _on_download_speed_plugin_click(self, _view=None):
+        _notify("info", "Скачиваем плагин Good Proxy Speed…")
+        run_on_queue(self._do_download_speed_plugin, PLUGINS_QUEUE)
 
-    def _fetch_proxies(self):
-        BulletinHelper.show_info("Загружаем список прокси…")
-        run_on_queue(self._do_fetch, PLUGINS_QUEUE)
-
-    def _do_fetch(self):
-        raw = None
-        for url in PROXIES_URLS:
+    def _do_download_speed_plugin(self):
+        remote_bytes = None
+        remote_version = None
+        errors = []
+        for base_url in SPEED_PLUGIN_URLS:
+            host = urlparse(base_url).hostname or base_url
+            sep = "&" if "?" in base_url else "?"
+            url = f"{base_url}{sep}t={int(time.time())}"
             try:
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36"}
+                    headers={
+                        "User-Agent": f"GoodProxy/{__version__} (Plugin Downloader)",
+                        "Cache-Control": "no-cache",
+                        "Pragma": "no-cache",
+                    },
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    raw = resp.read().decode("utf-8", errors="replace")
-                    break
-            except Exception:
-                pass
-
-        if not raw:
-            return run_on_ui_thread(lambda: BulletinHelper.show_error("Ошибка загрузки: проверьте подключение."))
-
-        parsed = {f"{p['host']}:{p['port']}:{p.get('secret', '')}": p for l in raw.splitlines() if (p := _parse_proxy(l))}
-        SC = _shared_config()
-        try:
-            SC.loadProxyList()
-            existing = {f"{p.address}:{p.port}:{p.secret or ''}" for i in range(SC.proxyList.size()) if (p := SC.proxyList.get(i))}
-        except Exception:
-            existing = set()
-
-        added = duplicates = 0
-        ProxyInfo = jclass("org.telegram.messenger.SharedConfig$ProxyInfo")
-        for key, p in parsed.items():
-            if p.get("speed"):
-                self._speed_cache[f"{p['host']}:{p['port']}"] = p["speed"]
-                self._speed_cache[p['host']] = p["speed"]
-            if key in existing:
-                duplicates += 1
-                continue
-            try:
-                SC.addProxy(ProxyInfo(str(p["host"]), int(p["port"]), "", "", str(p.get("secret", "") or "")))
-                existing.add(key)
-                added += 1
+                    code = resp.getcode()
+                    if code == 200:
+                        data = resp.read(2 * 1024 * 1024)
+                        header_sample = data[:3000].decode("utf-8", errors="ignore")
+                        if "good_proxy_speed" in header_sample:
+                            m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
+                            remote_version = m.group(1).strip() if m else "1.0.0"
+                            remote_bytes = data
+                            break
+                        else:
+                            errors.append(f"{host}: файл повреждён или не распознан")
+                    else:
+                        errors.append(f"{host}: HTTP {code}")
             except Exception as e:
-                log(f"[GoodProxy] addProxy error: {e}")
+                err_msg = f"{type(e).__name__}: {str(e)[:80]}"
+                errors.append(f"{host}: {err_msg}")
+                _log(f"Download speed plugin from {url} failed: {e}")
+                continue
 
-        self._save_speed_cache()
+        if not remote_bytes:
+            details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
+            return _notify("error", f"Не удалось скачать плагин Good Proxy Speed:\n{details}")
 
         try:
-            SC.saveProxyList()
-        except Exception:
-            pass
-
-        # 1. Отправляем системное уведомление ядру Telegram об изменении списка
-        try:
-            NC = jclass("org.telegram.messenger.NotificationCenter")
-            NC.getGlobalInstance().postNotificationName(NC.proxySettingsChanged)
+            from file_utils import get_plugins_dir
+            pdir = str(get_plugins_dir())
+            plugin_file = os.path.join(pdir, "good_proxy_speed.plugin")
+            with open(plugin_file, "wb") as f:
+                f.write(remote_bytes)
+            _log(f"Good Proxy Speed v{remote_version} successfully saved to {plugin_file}")
+            _notify("success", f"Плагин Good Proxy Speed (v{remote_version}) успешно скачан!\nПерезапустите Telegram для его активации.")
         except Exception as e:
-            log(f"[GoodProxy] notify proxySettingsChanged error: {e}")
+            _log(f"Failed to write speed plugin file: {e}")
+            _report_error(f"Сбой сохранения плагина: {e}")
 
-        # 2. Мгновенно перерисовываем активный экран списка прокси
+    def _on_check_update_click(self, _view=None):
+        _notify("info", "Проверяем наличие обновлений плагина…")
+        self._check_plugin_update(manual=True)
+
+    def _check_plugin_update(self, manual=False):
+        """Проверяет наличие новой версии плагина на GitHub и обновляет файл."""
+        if not manual:
+            try:
+                enabled = self.get_setting("auto_update_plugin", True)
+                if isinstance(enabled, str):
+                    enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "")
+                else:
+                    enabled = bool(enabled)
+            except Exception:
+                enabled = True
+            if not enabled:
+                return
+
+        def task():
+            current_ver_tuple = _parse_semver(__version__)
+            highest_remote_version = None
+            highest_remote_bytes = None
+            errors = []
+            for base_url in PLUGIN_UPDATE_URLS:
+                host = urlparse(base_url).hostname or base_url
+                sep = "&" if "?" in base_url else "?"
+                url = f"{base_url}{sep}t={int(time.time())}"
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "User-Agent": f"GoodProxy/{__version__} (Android Updater)",
+                            "Cache-Control": "no-cache",
+                            "Pragma": "no-cache",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        code = resp.getcode()
+                        if code == 200:
+                            data = resp.read(2 * 1024 * 1024)
+                            header_sample = data[:3000].decode("utf-8", errors="ignore")
+                            m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
+                            if m:
+                                cand_version = m.group(1).strip()
+                                cand_tuple = _parse_semver(cand_version)
+                                if highest_remote_version is None or cand_tuple > _parse_semver(highest_remote_version):
+                                    highest_remote_version = cand_version
+                                    highest_remote_bytes = data
+                                if cand_tuple > current_ver_tuple:
+                                    break
+                            else:
+                                errors.append(f"{host}: версия не распознана")
+                        else:
+                            errors.append(f"{host}: HTTP {code}")
+                except Exception as e:
+                    err_msg = f"{type(e).__name__}: {str(e)[:80]}"
+                    errors.append(f"{host}: {err_msg}")
+                    _log(f"Check update mirror {url} failed: {e}")
+                    continue
+
+            if not highest_remote_bytes or not highest_remote_version:
+                if manual:
+                    details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
+                    _notify("error", f"Не удалось проверить обновления плагина:\n{details}")
+                return
+
+            if _parse_semver(highest_remote_version) > current_ver_tuple:
+                try:
+                    target_file = None
+                    try:
+                        if "__file__" in globals() and __file__ and os.path.isfile(__file__):
+                            target_file = __file__
+                    except Exception:
+                        pass
+                    if not target_file:
+                        from file_utils import get_plugins_dir
+                        target_file = os.path.join(str(get_plugins_dir()), "good_proxy.plugin")
+                    with open(target_file, "wb") as f:
+                        f.write(highest_remote_bytes)
+                    _log(f"Plugin successfully updated to v{highest_remote_version} at {target_file}")
+                    _notify("success", f"Плагин Good Proxy обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
+                except Exception as e:
+                    _log(f"Failed to write updated plugin file: {e}")
+                    if manual:
+                        _report_error(f"Сбой записи обновленного файла плагина: {e}")
+            else:
+                if manual:
+                    _notify("info", f"У вас установлена последняя версия Good Proxy (v{__version__}).")
+
+        run_on_queue(task, PLUGINS_QUEUE)
+
+    def _on_sync_proxy_list_click(self, _view=None):
+        _notify("info", "Синхронизируем прокси с меню Telegram…")
+        run_on_queue(self._do_sync_proxy_list, PLUGINS_QUEUE)
+
+    def _do_sync_proxy_list(self):
+        try:
+            SC = _shared_config()
+            load_proxy_list = getattr(SC, "loadProxyList", None)
+            if callable(load_proxy_list):
+                load_proxy_list()
+            proxy_controller = _get_proxy_controller()
+            if proxy_controller is None:
+                return _report_error("Не удалось получить экземпляр ProxyController.")
+
+            shared_count = _proxy_list_size(_get_shared_config_proxy_list(SC))
+            controller_before = _proxy_list_size(_get_proxy_list(SC, proxy_controller))
+            synced, already_present, failed, sync_error, save_error, controller_list = _sync_shared_list_into_controller(
+                SC, proxy_controller
+            )
+            controller_after = _proxy_list_size(controller_list)
+            self._refresh_proxy_list_ui()
+
+            shared_text = str(shared_count) if shared_count is not None else "недоступен"
+            before_text = str(controller_before) if controller_before is not None else "неизвестно"
+            after_text = str(controller_after) if controller_after is not None else "неизвестно"
+            msg = (
+                f"SharedConfig: {shared_text}; ProxyController: {before_text} → {after_text}; "
+                f"перенесено в меню: {synced}; уже было: {already_present}; не добавлено: {failed}."
+            )
+            if sync_error:
+                msg += f"\nСинхронизация: {sync_error[:500]}"
+            if save_error:
+                msg += f"\nОшибка сохранения: {type(save_error).__name__}: {str(save_error)[:180]}"
+            if sync_error or save_error or failed:
+                return _report_error(msg)
+            _notify("success", msg)
+        except Exception as e:
+            _log(f"sync proxy list error: {e}")
+            _report_error(f"Сбой синхронизации списка прокси: {type(e).__name__}: {str(e)[:220]}")
+
+    def _refresh_proxy_list_ui(self):
         def _refresh_ui():
+            try:
+                NC = jclass("org.telegram.messenger.NotificationCenter")
+                NC.getGlobalInstance().postNotificationName(NC.proxySettingsChanged)
+            except Exception as e:
+                _log(f"notify proxySettingsChanged error: {e}")
             try:
                 frag = get_last_fragment()
                 if frag is not None:
-                    for meth in ("updateRows",):
-                        m = getattr(frag, meth, None)
-                        if callable(m):
-                            try: m(True)
+                    update_rows = getattr(frag, "updateRows", None)
+                    if callable(update_rows):
+                        try:
+                            update_rows(True)
+                        except Exception:
+                            try:
+                                update_rows()
                             except Exception:
-                                try: m()
-                                except Exception: pass
+                                pass
                     for attr in ("listAdapter", "adapter"):
-                        ad = get_private_field(frag, attr)
-                        if ad is not None and hasattr(ad, "notifyDataSetChanged"):
-                            ad.notifyDataSetChanged()
+                        adapter = get_private_field(frag, attr)
+                        if adapter is not None and hasattr(adapter, "notifyDataSetChanged"):
+                            adapter.notifyDataSetChanged()
                             break
             except Exception as e:
-                log(f"[GoodProxy] UI refresh error: {e}")
-
+                _log(f"UI refresh error: {e}")
         run_on_ui_thread(_refresh_ui)
 
-        run_on_ui_thread(lambda: BulletinHelper.show_success(f"Добавлено: {added}. Уже было: {duplicates}."))
+    def _on_test_sources_click(self, _view=None):
+        _notify("info", "Пингуем все зеркала и основной путь…")
+        run_on_queue(self._do_ping_sources, PLUGINS_QUEUE)
+
+    def _do_ping_sources(self):
+        """Measure every HTTPS route; send details separately from the short toast."""
+        results = []
+        compact_results = []
+        reachable = 0
+        short_names = {
+            "fastly.jsdelivr.net": "Fastly",
+            "cdn.jsdelivr.net": "jsDelivr",
+            "raw.githubusercontent.com": "GitHub Raw",
+            "ghproxy.net": "ghproxy",
+        }
+        # Always test all mirrors and the direct origin, regardless of settings.
+        for url in PROXIES_URLS:
+            host = (urlparse(url).hostname or url).lower()
+            source_name = {
+                "fastly.jsdelivr.net": "fastly.jsdelivr.net / jsDelivr (зеркало)",
+                "cdn.jsdelivr.net": "cdn.jsdelivr.net / jsDelivr (зеркало)",
+                "raw.githubusercontent.com": "raw.githubusercontent.com (GitHub)",
+                "ghproxy.net": "ghproxy.net (зеркало)",
+            }.get(host, host)
+            short_name = short_names.get(host, host)
+            t0 = time.monotonic()
+            status = None
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": f"GoodProxy/{__version__} (Android)",
+                        "Accept": "text/plain,*/*;q=0.8",
+                        "Range": "bytes=0-0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=7) as resp:
+                    status = int(resp.getcode() or 0)
+                    # Read one byte only; do not download the whole proxy list.
+                    resp.read(1)
+                ms = int((time.monotonic() - t0) * 1000)
+                if 200 <= status < 300:
+                    reachable += 1
+                    results.append(f"✓ {source_name}: HTTP {status}, {ms} мс\n  {url}")
+                    compact_results.append(f"{short_name} {ms}мс")
+                else:
+                    results.append(f"✗ {source_name}: HTTP {status}, {ms} мс\n  {url}")
+                    compact_results.append(f"{short_name} HTTP {status}")
+            except Exception as e:
+                ms = int((time.monotonic() - t0) * 1000)
+                error_status = getattr(e, "code", None) or status
+                if error_status:
+                    results.append(f"✗ {source_name}: HTTP {error_status}, {ms} мс\n  {url}")
+                    compact_results.append(f"{short_name} HTTP {error_status}")
+                else:
+                    reason = f"{type(e).__name__}: {str(e)[:100]}"
+                    results.append(f"✗ {source_name}: {reason} ({ms} мс)\n  {url}")
+                    compact_results.append(f"{short_name} {type(e).__name__}")
+
+        full_report = "Пинг источников по HTTPS:\n" + "\n".join(results)
+        full_report += f"\n\nДоступны: {reachable}/{len(PROXIES_URLS)}."
+        _log(f"Source ping completed:\n{full_report}")
+        if reachable < len(PROXIES_URLS):
+            return _report_error(full_report)
+
+        brief = f"Пинг: {reachable}/{len(PROXIES_URLS)} источника доступны.\n" + " · ".join(compact_results)
+        _notify("info", brief)
+
+    def _on_cleanup_nonworking_click(self, _view=None):
+        if getattr(self, "_cleanup_busy", False):
+            return _notify("info", "Нативная проверка прокси уже выполняется.")
+        self._cleanup_busy = True
+        _notify("info", "Запускаю штатную MTProto-проверку Telegram для списка прокси (может занять несколько минут)…")
+        run_on_queue(self._do_cleanup_nonworking_proxies, PLUGINS_QUEUE)
+
+    def _do_cleanup_nonworking_proxies(self):
+        background_started = [False]
+        try:
+            SC = _shared_config()
+            load_proxy_list = getattr(SC, "loadProxyList", None)
+            if callable(load_proxy_list):
+                load_proxy_list()
+            proxy_controller = _get_proxy_controller()
+            if proxy_controller is None:
+                return _report_error("Очистка остановлена: экземпляр ProxyController недоступен.")
+
+            controller_list = _get_proxy_list(SC, proxy_controller)
+            count = _proxy_list_size(controller_list)
+            if controller_list is None or count is None:
+                return _report_error("Очистка остановлена: не удалось прочитать ProxyController.getProxyList().")
+            if count == 0:
+                return _notify("info", "Список ProxyController пуст; проверять нечего.")
+
+            candidates, remove_signatures = _proxy_remove_candidates(proxy_controller)
+            if not candidates:
+                signature_text = "; ".join(remove_signatures[:20]) or "подходящих сигнатур не найдено"
+                return _report_error(
+                    "Очистка остановлена до проверки: не найден доступный instance-метод "
+                    "ProxyController для удаления ProxyInfo или элемента по индексу.\n"
+                    f"Найденные методы удаления: {signature_text}\n"
+                    f"API: {_proxy_api_diagnostics()}"
+                )
+
+            controller_records = []
+            controller_keys = set()
+            for index in range(count):
+                item = _proxy_list_item(controller_list, index)
+                if item is None:
+                    continue
+                try:
+                    host, port, secret, proxy_type = _proxy_item_values(item)
+                    if not host or not port:
+                        continue
+                    key = _proxy_key(host, port, secret)
+                    if key in controller_keys:
+                        continue
+                    controller_keys.add(key)
+                    controller_records.append((index, item, host, port, proxy_type, key))
+                except Exception:
+                    continue
+            if not controller_records:
+                return _notify("info", "В ProxyController нет записей с адресом и портом для проверки.")
+
+            current_proxy = None
+            try:
+                getter = getattr(proxy_controller, "getCurrentProxy", None)
+                if callable(getter):
+                    current_proxy = getter()
+            except Exception as e:
+                _log(f"getCurrentProxy for cleanup failed: {type(e).__name__}")
+            if current_proxy is None:
+                try:
+                    current_proxy = getattr(SC, "currentProxy", None)
+                except Exception:
+                    current_proxy = None
+            current_key = None
+            if current_proxy is not None:
+                try:
+                    host, port, secret, _proxy_type = _proxy_item_values(current_proxy)
+                    if host and port:
+                        current_key = _proxy_key(host, port, secret)
+                except Exception:
+                    pass
+            proxy_enabled = bool(getattr(SC, "proxyEnabled", False))
+            try:
+                enabled_method = getattr(SC, "isProxyEnabled", None)
+                if callable(enabled_method):
+                    proxy_enabled = bool(enabled_method())
+            except Exception:
+                pass
+            if current_key is None and (current_proxy is not None or proxy_enabled):
+                return _report_error(
+                    "Очистка остановлена: не удалось надёжно определить выбранный прокси. "
+                    "Чтобы не удалить его случайно, список не изменён."
+                )
+
+            # Telegram's stock checkProxyList reads SharedConfig.proxyList. Reset
+            # its result timestamps, then post the same notification used by the
+            # native proxy screen. Results are genuine client MTProto checks, not TCP.
+            shared_list = _get_shared_config_proxy_list(SC)
+            shared_count = _proxy_list_size(shared_list)
+            if shared_list is None or shared_count is None or shared_count == 0:
+                return _report_error(
+                    "Нативная MTProto-проверка недоступна: SharedConfig.proxyList пуст или не читается. "
+                    "Ни один прокси не удалён."
+                )
+
+            native_records = []
+            for index in range(shared_count):
+                item = _proxy_list_item(shared_list, index)
+                if item is None:
+                    continue
+                try:
+                    host, port, secret, _proxy_type = _proxy_item_values(item)
+                    if not host or not port:
+                        continue
+                    key = _proxy_key(host, port, secret)
+                    native_records.append((item, key))
+                except Exception:
+                    continue
+            if not native_records:
+                return _report_error(
+                    "В SharedConfig.proxyList нет записей для нативной проверки. "
+                    "Ни один прокси не удалён."
+                )
+
+            already_checking = []
+            for item, key in native_records:
+                try:
+                    if bool(getattr(item, "checking", False)):
+                        already_checking.append(key)
+                except Exception:
+                    continue
+            if already_checking:
+                return _notify(
+                    "info",
+                    f"Штатная проверка Telegram уже выполняется ({len(set(already_checking))} записей). "
+                    "Дождитесь её завершения и повторите очистку; список не изменён.",
+                )
+
+            native_items = []
+            reset_errors = 0
+            for item, key in native_records:
+                try:
+                    item.availableCheckTime = 0
+                    item.checking = False
+                    native_items.append((item, key))
+                except Exception:
+                    reset_errors += 1
+            if not native_items:
+                return _report_error(
+                    "Не удалось сбросить статусы SharedConfig для нативной проверки. "
+                    "Ни один прокси не удалён."
+                )
+            unique_native_keys = {key for _item, key in native_items}
+            target_native_keys = unique_native_keys & controller_keys
+            if not target_native_keys:
+                return _report_error(
+                    "Списки SharedConfig и ProxyController не содержат совпадающих прокси; "
+                    "MTProto-проверка не запущена, ничего не удалено."
+                )
+
+            triggered = threading.Event()
+            trigger_errors = []
+
+            def _post_native_check():
+                try:
+                    NotificationCenter = jclass("org.telegram.messenger.NotificationCenter")
+                    NotificationCenter.getGlobalInstance().postNotificationName(
+                        NotificationCenter.proxySettingsChanged
+                    )
+                except Exception as e:
+                    trigger_errors.append(type(e).__name__)
+                finally:
+                    triggered.set()
+
+            run_on_ui_thread(_post_native_check)
+            if not triggered.wait(timeout=8.0):
+                return _report_error(
+                    "Не удалось запустить штатную проверку Telegram через UI. Ни один прокси не удалён."
+                )
+            if trigger_errors:
+                return _report_error(
+                    "Не удалось запустить штатную проверку Telegram (" + trigger_errors[0] + "). "
+                    "Ни один прокси не удалён."
+                )
+
+            _notify(
+                "info",
+                f"Проверка запущена: Telegram проверяет список через MTProto; "
+                f"совпадающих с ProxyController записей: {len(target_native_keys)}. "
+                "Незавершённые результаты будут пропущены, а не удалены.",
+            )
+
+            def _poll_native_results():
+                try:
+                    started = time.monotonic()
+                    last_progress = started
+                    last_done = 0
+                    # Telegram checks the whole SharedConfig list in waves, even
+                    # though only the Controller-overlap keys are eligible here.
+                    waves = max(1, (len(unique_native_keys) + 3) // 4)
+                    timeout_sec = max(180.0, waves * 15.0 + 60.0)
+                    stalled = False
+                    timed_out = False
+                    status_by_key = {}
+
+                    while True:
+                        snapshot_ready = threading.Event()
+                        snapshot_box = [None]
+
+                        def _read_status_on_ui():
+                            snapshot = {}
+                            try:
+                                for item, key in native_items:
+                                    if key not in target_native_keys:
+                                        continue
+                                    try:
+                                        checked_at = int(getattr(item, "availableCheckTime", 0) or 0)
+                                        checking = bool(getattr(item, "checking", False))
+                                        if checked_at > 0 and not checking:
+                                            snapshot[key] = bool(getattr(item, "available", False))
+                                    except Exception:
+                                        continue
+                                snapshot_box[0] = snapshot
+                            finally:
+                                snapshot_ready.set()
+
+                        run_on_ui_thread(_read_status_on_ui)
+                        if not snapshot_ready.wait(timeout=5.0):
+                            now = time.monotonic()
+                            if now - started >= timeout_sec:
+                                timed_out = True
+                                break
+                            if now - last_progress >= 120.0:
+                                stalled = True
+                                break
+                            time.sleep(0.5)
+                            continue
+                        status_by_key = snapshot_box[0] or {}
+                        done = len(status_by_key)
+                        now = time.monotonic()
+                        if done > last_done:
+                            last_done = done
+                            last_progress = now
+                        if done >= len(target_native_keys):
+                            break
+                        if now - started >= timeout_sec:
+                            timed_out = True
+                            break
+                        if now - last_progress >= 120.0:
+                            stalled = True
+                            break
+                        time.sleep(1.0)
+
+                    (
+                        keys_to_remove,
+                        available_keys,
+                        unavailable_keys,
+                        unknown_keys,
+                        active_kept,
+                    ) = _native_cleanup_decision(status_by_key, controller_keys, current_key)
+
+                    summary = (
+                        f"Нативная MTProto-проверка: ProxyController {len(controller_records)}; "
+                        f"результат получен {len(status_by_key)}; отвечает {len(available_keys)}; "
+                        f"не отвечает {len(unavailable_keys)}; без результата {len(unknown_keys)}; "
+                        f"кандидатов на удаление {len(keys_to_remove)}."
+                    )
+                    if reset_errors:
+                        summary += f" Не удалось сбросить статусы {reset_errors} элементов SharedConfig."
+                    if timed_out:
+                        summary += " Достигнут лимит ожидания."
+                    elif stalled:
+                        summary += " Проверка остановилась без новых результатов."
+                    if unknown_keys:
+                        summary += " Записи без завершённого результата сохранены."
+                    if active_kept:
+                        summary += " Текущий выбранный прокси будет оставлен."
+
+                    if not keys_to_remove:
+                        self._cleanup_busy = False
+                        if not status_by_key:
+                            _report_error(summary + " Ничего не удалено; повторите проверку позже.")
+                        else:
+                            _notify("success", summary + " Список не изменён.")
+                        return
+
+                    self._show_cleanup_confirmation(keys_to_remove, summary)
+                except Exception as e:
+                    self._cleanup_busy = False
+                    _log(f"native proxy cleanup polling failed: {type(e).__name__}")
+                    _report_error(
+                        f"Сбой получения результатов штатной MTProto-проверки: {type(e).__name__}. "
+                        "Список прокси не изменён."
+                    )
+
+            watcher = threading.Thread(target=_poll_native_results, name="GoodProxyNativeCheck", daemon=True)
+            watcher.start()
+            background_started[0] = True
+        except Exception as e:
+            _log(f"cleanup native check start failed: {type(e).__name__}")
+            return _report_error(
+                f"Сбой запуска штатной MTProto-проверки: {type(e).__name__}. Ни один прокси не удалён."
+            )
+        finally:
+            if not background_started[0]:
+                self._cleanup_busy = False
+
+    def _show_cleanup_confirmation(self, keys_to_remove, scan_summary):
+        def _show():
+            try:
+                from ui.alert import AlertDialogBuilder
+                fragment = get_last_fragment()
+                context = fragment.getParentActivity() if fragment is not None else None
+                if context is None:
+                    raise RuntimeError("Не удалось получить Activity для подтверждения удаления")
+                builder = AlertDialogBuilder(context)
+                builder.set_title("Удалить неответившие прокси?")
+                builder.set_message(
+                    f"{scan_summary}\n\n"
+                    "Использована штатная MTProto-проверка Telegram (не простой TCP-connect). "
+                    "Прокси без завершённого результата не удаляются; выбранный прокси защищён, если его удалось идентифицировать."
+                )
+
+                def _confirm(dialog, _which):
+                    dialog.dismiss()
+                    run_on_queue(
+                        lambda keys=set(keys_to_remove), summary=scan_summary:
+                            self._do_remove_unreachable_proxies(keys, summary),
+                        PLUGINS_QUEUE,
+                    )
+
+                def _cancel(dialog, _which):
+                    dialog.dismiss()
+                    self._cleanup_busy = False
+                    _notify("info", "Очистка отменена; список не изменён.")
+
+                builder.set_positive_button("Удалить", _confirm)
+                builder.set_negative_button("Отмена", _cancel)
+                builder.show()
+            except Exception as e:
+                def _dialog_error(error=e):
+                    self._cleanup_busy = False
+                    _report_error(
+                        f"Не удалось показать подтверждение очистки: {type(error).__name__}: {str(error)[:180]}"
+                    )
+                run_on_queue(_dialog_error, PLUGINS_QUEUE)
+        run_on_ui_thread(_show)
+
+    def _do_remove_unreachable_proxies(self, keys_to_remove, scan_summary):
+        try:
+            SC = _shared_config()
+            proxy_controller = _get_proxy_controller()
+            if proxy_controller is None:
+                return _report_error("Удаление остановлено: экземпляр ProxyController недоступен.")
+            candidates, remove_signatures = _proxy_remove_candidates(proxy_controller)
+            if not candidates:
+                signature_text = "; ".join(remove_signatures[:20]) or "подходящих сигнатур не найдено"
+                return _report_error(
+                    "Удаление остановлено: не найден доступный instance-метод Controller для удаления.\n"
+                    f"Найденные методы: {signature_text}\nAPI: {_proxy_api_diagnostics()}"
+                )
+
+            current_proxy = None
+            try:
+                getter = getattr(proxy_controller, "getCurrentProxy", None)
+                if callable(getter):
+                    current_proxy = getter()
+            except Exception:
+                pass
+            if current_proxy is None:
+                try:
+                    current_proxy = getattr(SC, "currentProxy", None)
+                except Exception:
+                    current_proxy = None
+            current_key = None
+            if current_proxy is not None:
+                try:
+                    host, port, secret, _proxy_type = _proxy_item_values(current_proxy)
+                    if host and port:
+                        current_key = _proxy_key(host, port, secret)
+                except Exception:
+                    pass
+            target_keys = set(keys_to_remove)
+            active_kept = bool(current_key and current_key in target_keys)
+            if current_key:
+                target_keys.discard(current_key)
+
+            controller_list = _get_proxy_list(SC, proxy_controller)
+            count = _proxy_list_size(controller_list)
+            if controller_list is None or count is None:
+                return _report_error("Удаление остановлено: не удалось повторно прочитать ProxyController.getProxyList().")
+            records = []
+            for index in range(count):
+                item = _proxy_list_item(controller_list, index)
+                if item is None:
+                    continue
+                try:
+                    host, port, secret, _proxy_type = _proxy_item_values(item)
+                    key = _proxy_key(host, port, secret) if host and port else None
+                    if key in target_keys:
+                        records.append((index, item, host, port, key))
+                except Exception:
+                    continue
+            records.sort(key=lambda record: record[0], reverse=True)
+            if not records:
+                return _notify("info", "Кандидаты уже отсутствуют в ProxyController; список не изменён.")
+
+            removed_keys = set()
+            removal_methods = set()
+            removal_errors = []
+            for index, item, host, port, key in records:
+                removed, method_name, call_errors = _invoke_proxy_remove(
+                    proxy_controller, SC, item, index, key, candidates
+                )
+                if removed:
+                    removed_keys.add(key)
+                    removal_methods.add(method_name or "remove API")
+                else:
+                    detail = ", ".join(call_errors[:2]) or "запись осталась в Controller"
+                    removal_errors.append(f"{host}:{port}: {detail}")
+
+            controller_save_error = None
+            if removed_keys:
+                try:
+                    save = getattr(proxy_controller, "saveProxyList", None)
+                    if not callable(save):
+                        raise AttributeError("ProxyController.saveProxyList недоступен")
+                    save()
+                except Exception as e:
+                    controller_save_error = f"ProxyController.saveProxyList: {type(e).__name__}: {str(e)[:120]}"
+
+            shared_list = _get_shared_config_proxy_list(SC)
+            shared_removed, shared_remaining, shared_remove_errors = _remove_keys_from_java_list(
+                shared_list, removed_keys
+            )
+            shared_save_error = None
+            if shared_removed:
+                error = _persist_proxy_list(
+                    SC,
+                    add_api_used=False,
+                    controller_api_used=False,
+                    direct_list_add_used=True,
+                )
+                if error:
+                    shared_save_error = f"SharedConfig save: {type(error).__name__}: {str(error)[:140]}"
+
+            self._refresh_proxy_list_ui()
+            summary = (
+                f"{scan_summary}\nУдалено из ProxyController: {len(removed_keys)}; "
+                f"удалено из SharedConfig: {shared_removed}."
+            )
+            if active_kept:
+                summary += " Текущий выбранный прокси оставлен в списке."
+            if removal_methods:
+                summary += f" Метод удаления: {', '.join(sorted(removal_methods))}."
+            errors = []
+            if removal_errors:
+                errors.append("Не удалось удалить: " + "; ".join(removal_errors[:8]))
+            if shared_remaining:
+                errors.append(f"В SharedConfig остались совпадающие записи: {len(shared_remaining)}")
+            if shared_remove_errors:
+                errors.append("Ошибки очистки SharedConfig: " + "; ".join(shared_remove_errors[:4]))
+            if controller_save_error:
+                errors.append(controller_save_error)
+            if shared_save_error:
+                errors.append(shared_save_error)
+            if errors:
+                return _report_error(summary + "\n" + "\n".join(errors))
+            return _notify("success", summary)
+        except Exception as e:
+            _log(f"proxy cleanup removal error: {type(e).__name__}: {str(e)[:180]}")
+            return _report_error(
+                f"Сбой удаления проверенных прокси: {type(e).__name__}: {str(e)[:180]}"
+            )
+        finally:
+            self._cleanup_busy = False
+
+    def _is_allowed(self, p):
+        p_type = str(p.get("type", "mtproto")).lower()
+        secret = str(p.get("secret", "") or "").lower()
+        if p_type == "mtproto":
+            if secret.startswith("ee"):
+                return bool(self.get_setting("proto_faketls", True))
+            return bool(self.get_setting("proto_padding", True))
+        elif p_type == "web":
+            via = str(p.get("via", "") or "").lower()
+            if via == "websocket":
+                return bool(self.get_setting("proto_websocket", True))
+            elif via == "websocket-lanes":
+                return bool(self.get_setting("proto_websocket_lanes", True))
+            elif via == "https":
+                return bool(self.get_setting("proto_https", True))
+            elif via == "https-lanes":
+                return bool(self.get_setting("proto_https_lanes", True))
+            return True
+        return True
+
+    def _get_active_urls(self):
+        try:
+            value = self.get_setting("use_ghproxy", True)
+            if isinstance(value, str):
+                use_ghproxy = value.strip().lower() not in ("0", "false", "no", "off", "")
+            else:
+                use_ghproxy = bool(value)
+        except Exception:
+            use_ghproxy = True
+        if use_ghproxy:
+            return list(PROXIES_URLS)
+        return [url for url in PROXIES_URLS if "ghproxy.net" not in url.lower()]
+
+    def _prompt_import_tier(self):
+        """Показывает диалог выбора Tier перед импортом или использует фиксированную настройку."""
+        try:
+            mode_idx = int(self.get_setting("import_tier_mode", 0))
+        except Exception:
+            mode_idx = 0
+
+        # Режимы: 1: Все, 2: Tier 1, 3: Tier 2, 4: Tier 3
+        if mode_idx == 1:
+            self._fetch_proxies(tier_filter=0)
+            return
+        elif mode_idx == 2:
+            self._fetch_proxies(tier_filter=1)
+            return
+        elif mode_idx == 3:
+            self._fetch_proxies(tier_filter=2)
+            return
+        elif mode_idx == 4:
+            self._fetch_proxies(tier_filter=3)
+            return
+
+        # Режим 0: Спрашивать при импорте
+        def show_dialog():
+            try:
+                from ui.alert import AlertDialogBuilder
+                fragment = get_last_fragment()
+                context = fragment.getParentActivity() if fragment is not None else None
+                if context is None:
+                    self._fetch_proxies(tier_filter=0)
+                    return
+
+                items = [
+                    "🛡 Tier 1 (FakeTLS / сильный домен)",
+                    "🔒 Tier 2 (TLS / random-pad)",
+                    "⚡ Tier 3 (Стандартный MTProto)",
+                    "🌐 Все категории (Tier 1, 2, 3)",
+                ]
+
+                builder = AlertDialogBuilder(context)
+                builder.set_title("Импорт Good Proxy — выберите категорию")
+
+                def on_item(dialog, which):
+                    try:
+                        dialog.dismiss()
+                    except Exception:
+                        pass
+                    tier_map = {0: 1, 1: 2, 2: 3, 3: 0}
+                    selected_tier = tier_map.get(int(which), 0)
+                    self._fetch_proxies(tier_filter=selected_tier)
+
+                builder.set_items(items, on_item)
+                builder.set_negative_button("Отмена", lambda d, _w: d.dismiss())
+                builder.show()
+            except Exception as e:
+                _log(f"Prompt tier dialog error: {e}")
+                self._fetch_proxies(tier_filter=0)
+
+        run_on_ui_thread(show_dialog)
+
+    def _fetch_proxies(self, tier_filter=None):
+        if tier_filter is None:
+            self._prompt_import_tier()
+            return
+
+        tier_names = {
+            1: "Tier 1",
+            2: "Tier 2",
+            3: "Tier 3",
+            0: "Все",
+        }
+        tname = tier_names.get(tier_filter, "Все")
+        _notify("info", f"Загружаем список прокси ({tname})…")
+        run_on_queue(lambda: self._do_fetch(tier_filter=tier_filter), PLUGINS_QUEUE)
+
+    def _do_fetch(self, tier_filter=0):
+        try:
+            parsed = {}
+            source_url = None
+            source_errors = []
+
+            # Do not stop at the first HTTP 200: mirrors sometimes return an HTML
+            # error page or an empty file with status 200. Continue until links parse.
+            all_parsed = []
+            seen_keys = set()
+            for url in self._get_active_urls():
+                host = urlparse(url).hostname or url
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "User-Agent": f"GoodProxy/{__version__} (Android)",
+                            "Accept": "application/json,text/plain,*/*;q=0.8",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        status = int(resp.getcode() or 0)
+                        body = resp.read(2 * 1024 * 1024 + 1)
+                    if status != 200:
+                        source_errors.append(f"{host}: HTTP {status}")
+                        continue
+                    current = _parse_proxy_text(body)
+                    if not current:
+                        source_errors.append(f"{host}: ответ получен, но прокси-ссылки не распознаны")
+                        _log(f"No proxy links in response from {url}; bytes={len(body)}")
+                        continue
+                    if source_url is None:
+                        source_url = url
+                    for p in current:
+                        if not self._is_allowed(p):
+                            continue
+                        pkey = _proxy_key(
+                            p.get("host"),
+                            p.get("port"),
+                            p.get("secret", ""),
+                            p.get("type", "mtproto"),
+                        )
+                        if pkey not in seen_keys:
+                            seen_keys.add(pkey)
+                            all_parsed.append(p)
+
+                    # Все зеркала указывают на единый репозиторий Iliya3ProX/good_proxies;
+                    # после первого успешно полученного и распарсенного ответа останавливаем перебор зеркал.
+                    break
+                except Exception as e:
+                    source_errors.append(f"{host}: {type(e).__name__}: {str(e)[:80]}")
+                    _log(f"Fetch failed for {url}: {e}")
+
+            if not all_parsed:
+                details = "\n".join(source_errors[:4]) or "Источники не вернули данных."
+                return _report_error("Не удалось загрузить прокси.\n" + details)
+
+            parsed = all_parsed
+
+            if tier_filter in (1, 2, 3):
+                filtered = [p for p in parsed if p.get("tier") == tier_filter]
+                if not filtered:
+                    return _report_error(f"В источнике не найдено прокси с категорией Tier {tier_filter}.")
+                parsed = filtered
+
+            shared_sync_added = 0
+            shared_sync_duplicates = 0
+            shared_sync_failed = 0
+            shared_sync_error = None
+            shared_sync_save_error = None
+            try:
+                SC = _shared_config()
+                load_proxy_list = getattr(SC, "loadProxyList", None)
+                if callable(load_proxy_list):
+                    load_proxy_list()
+                proxy_controller = _get_proxy_controller()
+                proxy_list = _get_proxy_list(SC, proxy_controller)
+                if proxy_list is None:
+                    raise RuntimeError("ProxyController/SharedConfig: список прокси недоступен")
+                if proxy_controller is not None and callable(getattr(proxy_controller, "addProxy", None)):
+                    (
+                        shared_sync_added,
+                        shared_sync_duplicates,
+                        shared_sync_failed,
+                        shared_sync_error,
+                        shared_sync_save_error,
+                        synced_list,
+                    ) = _sync_shared_list_into_controller(SC, proxy_controller)
+                    if synced_list is not None:
+                        proxy_list = synced_list
+                existing = _proxy_list_keys(proxy_list)
+            except Exception as e:
+                _log(f"Cannot read Telegram proxy list: {e}")
+                return _report_error(
+                    f"Список прокси Telegram недоступен: {type(e).__name__}: {str(e)[:160]}"
+                )
+
+            try:
+                ProxyInfo = jclass("org.telegram.messenger.SharedConfig$ProxyInfo")
+            except Exception as e:
+                _log(f"ProxyInfo class unavailable: {e}")
+                return _report_error(
+                    f"В этой версии клиента не найден SharedConfig.ProxyInfo: {str(e)[:160]}"
+                )
+
+            added = failed = 0
+            already_present = 0
+            first_add_error = ""
+            add_api_used = False
+            controller_api_used = False
+            direct_list_add_used = False
+            for proxy in parsed:
+                key = _proxy_key(
+                    proxy.get("host"),
+                    proxy.get("port"),
+                    proxy.get("secret", ""),
+                    proxy.get("type", "mtproto"),
+                )
+                if key in existing:
+                    already_present += 1
+                    continue
+                try:
+                    info = _make_proxy_info(ProxyInfo, proxy)
+                except Exception as e:
+                    failed += 1
+                    if not first_add_error:
+                        first_add_error = f"ProxyInfo: {type(e).__name__}: {e}"
+                    _log(f"ProxyInfo constructor failed for {proxy.get('host')}: {e}")
+                    continue
+
+                before_size = _proxy_list_size(proxy_list)
+                add_error = None
+                add_call_succeeded = False
+                controller_add_called = False
+                try:
+                    add_proxy = None
+                    if proxy_controller is not None:
+                        add_proxy = getattr(proxy_controller, "addProxy", None)
+                        if callable(add_proxy):
+                            controller_add_called = True
+                    if not callable(add_proxy):
+                        add_proxy = getattr(SC, "addProxy", None)
+                    if not callable(add_proxy):
+                        raise AttributeError("ProxyController.addProxy/SharedConfig.addProxy отсутствует")
+                    add_proxy(info)
+                    add_call_succeeded = True
+                except Exception as e:
+                    add_error = e
+                    _log(f"Proxy add API failed for {key}: {e}")
+
+                refreshed_list = _get_proxy_list(SC, proxy_controller)
+                if refreshed_list is not None:
+                    proxy_list = refreshed_list
+                after_keys = _proxy_list_keys(proxy_list)
+                after_size = _proxy_list_size(proxy_list)
+                inserted = key in after_keys or (
+                    before_size is not None and after_size is not None and after_size > before_size
+                )
+                inserted_via_api = add_call_succeeded
+
+                # Direct-list fallback is only for legacy paths without Controller.addProxy.
+                if not inserted and not controller_add_called:
+                    try:
+                        proxy_list.add(info)
+                    except Exception as fallback_error:
+                        _log(f"proxyList.add fallback failed for {key}: {fallback_error}")
+                        if not first_add_error:
+                            reason = add_error or fallback_error
+                            first_add_error = f"{type(reason).__name__}: {reason}"
+                    refreshed_list = _get_proxy_list(SC, proxy_controller)
+                    if refreshed_list is not None:
+                        proxy_list = refreshed_list
+                    after_keys = _proxy_list_keys(proxy_list)
+                    after_size = _proxy_list_size(proxy_list)
+                    inserted = key in after_keys or (
+                        before_size is not None and after_size is not None and after_size > before_size
+                    )
+
+                if inserted:
+                    added += 1
+                    existing.add(key)
+                    if inserted_via_api:
+                        add_api_used = True
+                        if controller_add_called:
+                            controller_api_used = True
+                    else:
+                        direct_list_add_used = True
+                else:
+                    failed += 1
+                    if not first_add_error:
+                        reason = add_error or RuntimeError("элемент не появился в SharedConfig.proxyList")
+                        first_add_error = f"{type(reason).__name__}: {reason}"
+
+            try:
+                shared_count = _proxy_list_size(_get_shared_config_proxy_list(SC))
+            except Exception:
+                shared_count = None
+            try:
+                controller_count = _proxy_list_size(_get_proxy_list(SC, proxy_controller))
+            except Exception:
+                controller_count = None
+
+            save_error = shared_sync_save_error
+            if added:
+                source_save_error = _persist_proxy_list(
+                    SC,
+                    add_api_used and not direct_list_add_used,
+                    controller_api_used,
+                    direct_list_add_used,
+                    proxy_controller,
+                )
+                if source_save_error:
+                    save_error = source_save_error
+            if save_error:
+                _log(f"Could not persist proxy list: {save_error}")
+
+            self._refresh_proxy_list_ui()
+
+            host = urlparse(source_url).hostname or source_url
+            tier_tag = f" [Tier {tier_filter}]" if tier_filter in (1, 2, 3) else ""
+            summary = (
+                f"Источник: {host}{tier_tag}. Отобрано: {len(parsed)}. "
+                f"Добавлено в клиент: {added}."
+            )
+            if already_present:
+                summary += f" Уже было в клиенте: {already_present}."
+            if failed:
+                summary += f" Не удалось добавить из источника: {failed}."
+                if first_add_error:
+                    summary += f"\nПричина: {first_add_error[:1400]}"
+            if shared_count is not None or controller_count is not None:
+                shared_text = str(shared_count) if shared_count is not None else "недоступен"
+                controller_text = str(controller_count) if controller_count is not None else "недоступен"
+                summary += (
+                    f"\nProxyController: {controller_text}; SharedConfig: {shared_text}; "
+                    f"перенесено в Controller: {shared_sync_added}; уже было в Controller: {shared_sync_duplicates}."
+                )
+            if shared_sync_error:
+                summary += f"\nОшибка переноса SharedConfig → ProxyController: {shared_sync_error[:500]}"
+            if shared_sync_failed:
+                summary += f"\nОсталось перенести из SharedConfig: {shared_sync_failed}."
+            if save_error:
+                summary += f"\nОшибка сохранения: {type(save_error).__name__}: {str(save_error)[:180]}"
+
+            if failed or shared_sync_failed or save_error or shared_sync_error:
+                _report_error(summary)
+            else:
+                _notify("success", summary)
+
+        except Exception as e:
+            _log(f"do_fetch fatal error: {type(e).__name__}: {e}")
+            return _report_error(f"Сбой импорта прокси: {type(e).__name__}: {str(e)[:160]}")
 
     def _export_proxies(self):
         run_on_queue(self._do_export, PLUGINS_QUEUE)
@@ -443,30 +2510,66 @@ class ProxyManagerPlugin(BasePlugin):
     def _do_export(self):
         try:
             SC = _shared_config()
-            SC.loadProxyList()
-            if not SC.proxyList or SC.proxyList.size() == 0:
-                return run_on_ui_thread(lambda: BulletinHelper.show_info("Нет прокси для экспорта."))
-            proxies = []
-            for i in range(SC.proxyList.size()):
-                p = SC.proxyList.get(i)
-                proxies.append({"host": str(p.address), "port": int(p.port), "secret": str(p.secret) if p.secret else ""})
-            def sort_key(p):
-                try: h_val = (0, ipaddress.ip_address(p['host']).version, ipaddress.ip_address(p['host']))
-                except ValueError: h_val = (1, 0, p['host'])
-                return (h_val, p['port'], len(p['secret']), p['secret'])
-            
-            lines = []
-            for p in sorted(proxies, key=sort_key):
-                speed = self._get_proxy_speed(p['host'], p['port'])
-                speed_tag = f"#⚡{speed.replace(' ', '')}" if speed else ""
-                lines.append(f"tg://proxy?server={p['host']}&port={p['port']}&secret={p['secret']}{speed_tag}")
+            load_proxy_list = getattr(SC, "loadProxyList", None)
+            if callable(load_proxy_list):
+                load_proxy_list()
+            proxy_controller = _get_proxy_controller()
+            controller_list = _get_proxy_list(SC, proxy_controller)
+            shared_list = _get_shared_config_proxy_list(SC)
+            merged_list = _merge_proxy_lists(controller_list, shared_list)
+            if not merged_list:
+                return _notify("info", "Нет прокси для экспорта.")
 
-            if not lines: return run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось сформировать список."))
-            txt = "\n".join(lines)
-            q = TLRPC.TL_messageEntityBlockquote()
-            q.collapsed, q.offset, q.length = True, 0, len(txt.encode("utf-16-le")) // 2
-            send_message({"peer": get_user_config().getClientUserId(), "message": txt, "entities": [q]})
-            run_on_ui_thread(lambda: BulletinHelper.show_success(f"Экспортировано {len(lines)} прокси в Избранное."))
+            faketls, padding, web = [], [], []
+            for p in merged_list:
+                host, port, secret, kind = _proxy_item_values(p)
+                if not host:
+                    continue
+                kind_str = str(kind or "").upper()
+                if kind_str == "WEB" or int(port or 0) == 0:
+                    web.append(f"tg://webproxy?server={host}&secret={secret}")
+                else:
+                    e = {
+                        "addr": host,
+                        "port": int(port or 443),
+                        "secret": str(secret or ""),
+                        "line": f"tg://proxy?server={host}&port={port}&secret={secret}",
+                    }
+                    if str(secret).lower().startswith("ee"):
+                        faketls.append(e)
+                    else:
+                        padding.append(e)
+
+            def _mtp_sort_key(e):
+                try:
+                    ip_key = (0, int(ipaddress.ip_address(e["addr"])))
+                except Exception:
+                    ip_key = (1, e["addr"])
+                return (ip_key, e["port"], len(e["secret"]), e["secret"])
+
+            def _web_sort_key(line):
+                p = parse_qs(urlparse(line).query)
+                return (p.get("server", [""])[0], p.get("secret", [""])[0])
+
+            faketls.sort(key=_mtp_sort_key)
+            padding.sort(key=_mtp_sort_key)
+            web.sort(key=_web_sort_key)
+
+            sections = []
+            if faketls:
+                sections.append("FakeTLS (MTProto):\n" + "\n".join(e["line"] for e in faketls))
+            if padding:
+                sections.append("Padding / Classic (MTProto):\n" + "\n".join(e["line"] for e in padding))
+            if web:
+                sections.append("WebProxy:\n" + "\n".join(web))
+
+            if not sections:
+                return _report_error("Не удалось сформировать список прокси.")
+
+            txt = "\n\n".join(sections)
+            _copy_to_clipboard(txt, label="GoodProxy_Export")
+            total = len(faketls) + len(padding) + len(web)
+            _notify("success", f"Экспортировано {total} прокси! Скопировано в буфер обмена.")
         except Exception as e:
-            log(f"[PS] export error: {e}")
-            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Ошибка экспорта: {e}"))
+            _log(f"export error: {e}")
+            _report_error(f"Ошибка экспорта: {e}")
