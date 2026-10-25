@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -354,9 +354,16 @@ def _parse_proxy(line):
 
         secret = str(params.get("secret", [""])[0] or "").strip()
         speed = ""
+        speed_val = 0.0
         tier = 1 if is_web else 3
         if u.fragment:
             frag_raw = unquote(u.fragment)
+            m_speed = re.search(r"([\d.]+)\s*MBs", frag_raw, re.IGNORECASE)
+            if m_speed:
+                try:
+                    speed_val = float(m_speed.group(1))
+                except ValueError:
+                    speed_val = 0.0
             m_tier = re.search(r"tier\s*([123])", frag_raw, re.IGNORECASE)
             if m_tier:
                 tier = int(m_tier.group(1))
@@ -385,6 +392,7 @@ def _parse_proxy(line):
             "port": port,
             "secret": secret,
             "speed": speed,
+            "speed_val": speed_val,
             "tier": tier,
             "type": "web" if is_web else "mtproto",
         }
@@ -1296,6 +1304,7 @@ class ProxyManagerPlugin(BasePlugin):
                         "Только Tier 1 (FakeTLS)",
                         "Только Tier 2 (TLS / random-pad)",
                         "Только Tier 3 (Стандартный MTProto)",
+                        "Только проверенная скорость",
                     ],
                     icon="msg_download",
                 ))
@@ -2184,7 +2193,7 @@ class ProxyManagerPlugin(BasePlugin):
         except Exception:
             mode_idx = 0
 
-        # Режимы: 1: Все, 2: Tier 1, 3: Tier 2, 4: Tier 3
+        # Режимы: 1: Все, 2: Tier 1, 3: Tier 2, 4: Tier 3, 5: Проверенная скорость
         if mode_idx == 1:
             self._fetch_proxies(tier_filter=0)
             return
@@ -2196,6 +2205,9 @@ class ProxyManagerPlugin(BasePlugin):
             return
         elif mode_idx == 4:
             self._fetch_proxies(tier_filter=3)
+            return
+        elif mode_idx == 5:
+            self._fetch_proxies(tier_filter=-1)
             return
 
         # Режим 0: Спрашивать при импорте
@@ -2209,6 +2221,7 @@ class ProxyManagerPlugin(BasePlugin):
                     return
 
                 items = [
+                    "🏎 Проверенная скорость (замер МБ/с)",
                     "🛡 Tier 1 (FakeTLS / сильный домен)",
                     "🔒 Tier 2 (TLS / random-pad)",
                     "⚡ Tier 3 (Стандартный MTProto)",
@@ -2223,7 +2236,7 @@ class ProxyManagerPlugin(BasePlugin):
                         dialog.dismiss()
                     except Exception:
                         pass
-                    tier_map = {0: 1, 1: 2, 2: 3, 3: 0}
+                    tier_map = {0: -1, 1: 1, 2: 2, 3: 3, 4: 0}
                     selected_tier = tier_map.get(int(which), 0)
                     self._fetch_proxies(tier_filter=selected_tier)
 
@@ -2245,6 +2258,7 @@ class ProxyManagerPlugin(BasePlugin):
             1: "Tier 1",
             2: "Tier 2",
             3: "Tier 3",
+            -1: "Проверенная скорость",
             0: "Все",
         }
         tname = tier_names.get(tier_filter, "Все")
@@ -2310,7 +2324,13 @@ class ProxyManagerPlugin(BasePlugin):
 
             parsed = all_parsed
 
-            if tier_filter in (1, 2, 3):
+            if tier_filter == -1:
+                filtered = [p for p in parsed if p.get("speed_val", 0.0) > 0]
+                if not filtered:
+                    return _report_error("В источнике нет прокси с проверенной скоростью.")
+                filtered.sort(key=lambda p: -p.get("speed_val", 0.0))
+                parsed = filtered
+            elif tier_filter in (1, 2, 3):
                 filtered = [p for p in parsed if p.get("tier") == tier_filter]
                 if not filtered:
                     return _report_error(f"В источнике не найдено прокси с категорией Tier {tier_filter}.")
