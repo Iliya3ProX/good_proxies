@@ -1,1 +1,2 @@
-vless://bcf07b50-9da7-44dc-a955-43302f12e1e5@37.235.249.44:443?flow=xtls-rprx-vision&type=raw&security=reality&sni=abuse.ozon.ru&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&fp=chrome#%F0%9F%8C%90%20Anycast-IP%20%7C%20%F0%9F%87%AB%F0%9F%87%B7%20%F0%9F%87%B7%F0%9F%87%BA%20%7C%20%5B%2ACIDR%5D
+vless://existing@1.1.1.1:443#Existing
+vless://new_key@2.2.2.2:8443?security=reality#New1
