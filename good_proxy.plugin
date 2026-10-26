@@ -189,11 +189,11 @@ _PROXY_LINK_RE = re.compile(
 _SAVED_OUTPUT_URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
 
 
-def _proxy_key(host, port, secret="", proxy_type="mtproto", via=""):
+def _proxy_key(host, port, secret="", proxy_type="mtproto"):
     """Canonical key used for de-duplication across URL/source variants."""
     p_type = str(proxy_type or "mtproto").lower()
     if p_type == "web" or int(port or 0) == 0:
-        return f"web:{str(host or '').strip().lower()}:{int(port or 443)}:{str(secret or '').strip()}:{str(via or '').strip().lower()}"
+        return f"web:{str(host or '').strip().lower()}:{str(secret or '').strip()}"
     return f"mtproto:{str(host or '').strip().lower()}:{int(port)}:{str(secret or '').strip()}"
 
 
@@ -353,7 +353,6 @@ def _parse_proxy(line):
             return None
 
         secret = str(params.get("secret", [""])[0] or "").strip()
-        via = str(params.get("via", [""])[0] or "").strip().lower()
         speed = ""
         speed_val = 0.0
         tier = 1 if is_web else 3
@@ -396,7 +395,6 @@ def _parse_proxy(line):
             "speed_val": speed_val,
             "tier": tier,
             "type": "web" if is_web else "mtproto",
-            "via": via,
         }
     except Exception:
         return None
@@ -927,11 +925,7 @@ def _make_proxy_info(proxy_info_class, proxy):
         settings_error = e
         _log(f"ProxySettings constructor path failed: {e}")
 
-    # 3. WebProxy не должен сваливаться в устаревший пятиаргументный конструктор MTProto
-    if proxy_type == "web":
-        raise RuntimeError("Текущий клиент Telegram не поддерживает протокол WebProxy (требуется exteraGram или AyuGram)")
-
-    # 4. Older Telegram builds use either the traditional five-argument
+    # 3. Older Telegram builds use either the traditional five-argument
     # constructor or a no-argument ProxyInfo with public fields.
     try:
         return proxy_info_class(host, port, "", "", secret)
@@ -2231,8 +2225,7 @@ class ProxyManagerPlugin(BasePlugin):
                     "🛡 Tier 1 (FakeTLS / сильный домен)",
                     "🔒 Tier 2 (TLS / random-pad)",
                     "⚡ Tier 3 (Стандартный MTProto)",
-                    "🕸 WebProxy (WebSocket / HTTPS)",
-                    "🌐 Все категории (MTProto + WebProxy)",
+                    "🌐 Все категории (Tier 1, 2, 3)",
                 ]
 
                 builder = AlertDialogBuilder(context)
@@ -2243,7 +2236,7 @@ class ProxyManagerPlugin(BasePlugin):
                         dialog.dismiss()
                     except Exception:
                         pass
-                    tier_map = {0: -1, 1: 1, 2: 2, 3: 3, 4: "web", 5: 0}
+                    tier_map = {0: -1, 1: 1, 2: 2, 3: 3, 4: 0}
                     selected_tier = tier_map.get(int(which), 0)
                     self._fetch_proxies(tier_filter=selected_tier)
 
@@ -2266,7 +2259,6 @@ class ProxyManagerPlugin(BasePlugin):
             2: "Tier 2",
             3: "Tier 3",
             -1: "Проверенная скорость",
-            "web": "WebProxy",
             0: "Все",
         }
         tname = tier_names.get(tier_filter, "Все")
@@ -2283,12 +2275,7 @@ class ProxyManagerPlugin(BasePlugin):
             # error page or an empty file with status 200. Continue until links parse.
             all_parsed = []
             seen_keys = set()
-            urls_to_fetch = self._get_active_urls()
-            if tier_filter == "web":
-                # Добавляем специализированные зеркала web_proxies.txt
-                urls_to_fetch = [u.replace("proxies.txt", "proxy_results/web_proxies.txt") for u in urls_to_fetch] + urls_to_fetch
-
-            for url in urls_to_fetch:
+            for url in self._get_active_urls():
                 host = urlparse(url).hostname or url
                 try:
                     req = urllib.request.Request(
@@ -2319,7 +2306,6 @@ class ProxyManagerPlugin(BasePlugin):
                             p.get("port"),
                             p.get("secret", ""),
                             p.get("type", "mtproto"),
-                            p.get("via", ""),
                         )
                         if pkey not in seen_keys:
                             seen_keys.add(pkey)
@@ -2343,11 +2329,6 @@ class ProxyManagerPlugin(BasePlugin):
                 if not filtered:
                     return _report_error("В источнике нет прокси с проверенной скоростью.")
                 filtered.sort(key=lambda p: -p.get("speed_val", 0.0))
-                parsed = filtered
-            elif tier_filter == "web":
-                filtered = [p for p in parsed if p.get("type") == "web"]
-                if not filtered:
-                    return _report_error("В источнике не найдено прокси типа WebProxy.")
                 parsed = filtered
             elif tier_filter in (1, 2, 3):
                 filtered = [p for p in parsed if p.get("tier") == tier_filter]
@@ -2566,8 +2547,7 @@ class ProxyManagerPlugin(BasePlugin):
                     continue
                 kind_str = str(kind or "").upper()
                 if kind_str == "WEB" or int(port or 0) == 0:
-                    port_str = f"&port={port}" if (port and int(port) not in (0, 443)) else ""
-                    web.append(f"tg://webproxy?server={host}{port_str}&secret={secret}")
+                    web.append(f"tg://webproxy?server={host}&secret={secret}")
                 else:
                     e = {
                         "addr": host,
