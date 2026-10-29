@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -48,6 +48,12 @@ SPEED_PLUGIN_URLS = [
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
 ]
+
+# SHA-256 эталонной версии speed-плагина (обновляется синхронно с этим плагином).
+# Если версия файла совпала с эталонной, а хеш нет — подмена, установка блокируется.
+# Новая версия без эталонного хеша ставится с предупреждением.
+SPEED_PLUGIN_PIN_VERSION = "1.0.4"
+SPEED_PLUGIN_SHA256 = "32872952045f6a4732be06f3ae4daa0ffcb4b855888250890693152d2b9c88e4"
 
 
 def _copy_to_clipboard(text, label="GoodProxy_Proxies"):
@@ -1469,6 +1475,20 @@ class ProxyManagerPlugin(BasePlugin):
             details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
             return _notify("error", f"Не удалось скачать плагин Good Proxy Speed:\n{details}")
 
+        # Проверка целостности против эталонного хеша (см. SPEED_PLUGIN_SHA256)
+        try:
+            import hashlib as _hashlib
+            digest = _hashlib.sha256(remote_bytes).hexdigest()
+            if SPEED_PLUGIN_SHA256 and digest != SPEED_PLUGIN_SHA256:
+                if remote_version == SPEED_PLUGIN_PIN_VERSION:
+                    _log(f"Speed plugin integrity check FAILED (pinned v{SPEED_PLUGIN_PIN_VERSION})")
+                    return _notify("error", "Скачанный плагин Good Proxy Speed не прошёл проверку целостности "
+                                            "(SHA-256 не совпал для эталонной версии). Установка отменена.")
+                _notify("warning", f"Версия Good Proxy Speed {remote_version} ещё не зафиксирована эталонным хешем — "
+                                   "устанавливаю без сверки целостности.")
+        except Exception as _e:
+            _log(f"Speed plugin hash check error: {type(_e).__name__}")
+
         try:
             from file_utils import get_plugins_dir
             pdir = str(get_plugins_dir())
@@ -1501,9 +1521,9 @@ class ProxyManagerPlugin(BasePlugin):
 
         def task():
             current_ver_tuple = _parse_semver(__version__)
-            highest_remote_version = None
-            highest_remote_bytes = None
             errors = []
+            # Этап 1: дешёвая проба версий по всем зеркалам (читаем только шапку файла)
+            probes = []  # (version, base_url, host)
             for base_url in PLUGIN_UPDATE_URLS:
                 host = urlparse(base_url).hostname or base_url
                 sep = "&" if "?" in base_url else "?"
@@ -1519,56 +1539,110 @@ class ProxyManagerPlugin(BasePlugin):
                     )
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         code = resp.getcode()
-                        if code == 200:
-                            data = resp.read(2 * 1024 * 1024)
-                            header_sample = data[:3000].decode("utf-8", errors="ignore")
-                            m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
-                            if m:
-                                cand_version = m.group(1).strip()
-                                cand_tuple = _parse_semver(cand_version)
-                                if highest_remote_version is None or cand_tuple > _parse_semver(highest_remote_version):
-                                    highest_remote_version = cand_version
-                                    highest_remote_bytes = data
-                                if cand_tuple > current_ver_tuple:
-                                    break
-                            else:
-                                errors.append(f"{host}: версия не распознана")
-                        else:
+                        if code != 200:
                             errors.append(f"{host}: HTTP {code}")
+                            continue
+                        header_sample = resp.read(3000).decode("utf-8", errors="ignore")
+                    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
+                    if m:
+                        probes.append((m.group(1).strip(), base_url, host))
+                    else:
+                        errors.append(f"{host}: версия не распознана")
                 except Exception as e:
-                    err_msg = f"{type(e).__name__}: {str(e)[:80]}"
-                    errors.append(f"{host}: {err_msg}")
+                    errors.append(f"{host}: {type(e).__name__}: {str(e)[:80]}")
                     _log(f"Check update mirror {url} failed: {e}")
                     continue
 
-            if not highest_remote_bytes or not highest_remote_version:
+            if not probes:
                 if manual:
                     details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
                     _notify("error", f"Не удалось проверить обновления плагина:\n{details}")
                 return
 
-            if _parse_semver(highest_remote_version) > current_ver_tuple:
-                try:
-                    target_file = None
-                    try:
-                        if "__file__" in globals() and __file__ and os.path.isfile(__file__):
-                            target_file = __file__
-                    except Exception:
-                        pass
-                    if not target_file:
-                        from file_utils import get_plugins_dir
-                        target_file = os.path.join(str(get_plugins_dir()), "good_proxy.plugin")
-                    with open(target_file, "wb") as f:
-                        f.write(highest_remote_bytes)
-                    _log(f"Plugin successfully updated to v{highest_remote_version} at {target_file}")
-                    _notify("success", f"Плагин Good Proxy обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
-                except Exception as e:
-                    _log(f"Failed to write updated plugin file: {e}")
-                    if manual:
-                        _report_error(f"Сбой записи обновленного файла плагина: {e}")
-            else:
+            try:
+                highest_remote_version = max((v for v, _, _ in probes), key=_parse_semver)
+            except Exception:
+                highest_remote_version = None
+            if not highest_remote_version or _parse_semver(highest_remote_version) <= current_ver_tuple:
                 if manual:
                     _notify("info", f"У вас установлена последняя версия Good Proxy (v{__version__}).")
+                return
+
+            # Этап 2: полное скачивание у зеркал с максимальной версией и перекрёстная
+            # сверка SHA-256. Компрометация одного зеркала больше не даёт удалённое
+            # исполнение кода: файл ставится только при консенсусе двух независимых
+            # источников либо когда ответило всего одно зеркало (с предупреждением).
+            import hashlib as _hashlib
+            groups = {}  # digest -> {"bytes": data, "hosts": [host]}
+            responded = 0
+            for ver, base_url, host in probes:
+                if ver != highest_remote_version:
+                    continue
+                sep = "&" if "?" in base_url else "?"
+                url = f"{base_url}{sep}t={int(time.time())}"
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "User-Agent": f"GoodProxy/{__version__} (Android Updater)",
+                            "Cache-Control": "no-cache",
+                            "Pragma": "no-cache",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        if resp.getcode() != 200:
+                            errors.append(f"{host}: HTTP {resp.getcode()} (полная загрузка)")
+                            continue
+                        data = resp.read(4 * 1024 * 1024)
+                    responded += 1
+                    entry = groups.setdefault(_hashlib.sha256(data).hexdigest(), {"bytes": data, "hosts": []})
+                    entry["hosts"].append(host)
+                except Exception as e:
+                    errors.append(f"{host}: {type(e).__name__}: {str(e)[:80]} (полная загрузка)")
+                    _log(f"Full download mirror {url} failed: {e}")
+                    continue
+
+            if not groups:
+                if manual:
+                    details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
+                    _notify("error", f"Не удалось скачать обновление плагина:\n{details}")
+                return
+
+            consensus = max(groups.values(), key=lambda g: len(g["hosts"]))
+            verified = len(consensus["hosts"]) >= 2
+            if not verified and len(groups) > 1:
+                # Несколько зеркал ответили, но содержимое разное — установка запрещена
+                _log(f"Update integrity check failed: mirrors disagree ({[g['hosts'] for g in groups.values()]})")
+                if manual:
+                    _notify("error", "Обновление отклонено: зеркала вернули разные файлы. "
+                                     "Попробуйте позже или скачайте плагин вручную.")
+                return
+
+            target_bytes = consensus["bytes"]
+            try:
+                target_file = None
+                try:
+                    if "__file__" in globals() and __file__ and os.path.isfile(__file__):
+                        target_file = __file__
+                except Exception:
+                    pass
+                if not target_file:
+                    from file_utils import get_plugins_dir
+                    target_file = os.path.join(str(get_plugins_dir()), "good_proxy.plugin")
+                with open(target_file, "wb") as f:
+                    f.write(target_bytes)
+                _log(f"Plugin successfully updated to v{highest_remote_version} at {target_file} "
+                     f"(verified={verified}, mirrors={consensus['hosts']})")
+                if verified:
+                    _notify("success", f"Плагин Good Proxy обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
+                else:
+                    _notify("warning", f"Плагин Good Proxy обновлен до v{highest_remote_version}.\n"
+                                       "Внимание: файл получен только с одного зеркала, перекрёстная сверка недоступна.\n"
+                                       "Перезапустите Telegram для применения изменений.")
+            except Exception as e:
+                _log(f"Failed to write updated plugin file: {e}")
+                if manual:
+                    _report_error(f"Сбой записи обновленного файла плагина: {e}")
 
         run_on_queue(task, PLUGINS_QUEUE)
 
@@ -2019,6 +2093,9 @@ class ProxyManagerPlugin(BasePlugin):
                     raise RuntimeError("Не удалось получить Activity для подтверждения удаления")
                 builder = AlertDialogBuilder(context)
                 builder.set_title("Удалить неответившие прокси?")
+                # Без этого наружный тап закрывает диалог мимо _cancel и _cleanup_busy
+                # залипает до перезапуска клиента
+                builder.set_cancelable(False)
                 builder.set_message(
                     f"{scan_summary}\n\n"
                     "Использована штатная MTProto-проверка Telegram (не простой TCP-connect). "
