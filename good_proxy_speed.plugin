@@ -21,7 +21,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -1014,9 +1014,13 @@ class GoodProxySpeedPlugin(BasePlugin):
                 "error",
                 "Тестовый файл не найден. Перейдите в настройки Good Proxy Speed и нажмите «Сгенерировать файл для теста скорости».",
             )
-        self._bulk_speed_busy = True
-        _notify("info", "Запускаю пакетный замер скорости прокси…")
-        run_on_queue(self._run_bulk_speed_test, PLUGINS_QUEUE)
+        # Замер скорости работает только через активный прокси клиента; пакетный режим
+        # потребовал бы переключать активный прокси для каждого узла — не реализован.
+        # Честное сообщение вместо ложного отчёта об успехе.
+        return _notify(
+            "info",
+            "Пакетный замер недоступен, используйте одиночный: включите нужный прокси и нажмите «Проверить скорость».",
+        )
 
     def _run_bulk_speed_test(self):
         try:
@@ -1033,19 +1037,14 @@ class GoodProxySpeedPlugin(BasePlugin):
             sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
             target_size = sizes[size_idx] if 0 <= size_idx < len(sizes) else 10 * 1024 * 1024
 
-            tested = successes = 0
-            for idx in range(count):
-                item = _proxy_list_item(controller_list, idx)
-                if item is None:
-                    continue
-                host, port, secret, p_type = _proxy_item_values(item)
-                if not host or not port:
-                    continue
-                tested += 1
-                successes += 1
-
+            # Пакетный замер не реализован: скорость меряется только на активном
+            # прокси клиента. Сообщаем честно вместо ложного отчёта об успехе.
             self._bulk_speed_busy = False
-            _notify("success", f"Пакетный замер завершён: обработано {tested} прокси.")
+            _notify(
+                "info",
+                "Пакетный замер недоступен, используйте одиночный: включите нужный прокси и нажмите «Проверить скорость».",
+            )
+            return
         except Exception as e:
             self._bulk_speed_busy = False
             _log(f"bulk speed test error: {e}")
