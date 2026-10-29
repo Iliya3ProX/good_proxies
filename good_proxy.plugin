@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.3.1"
+__version__ = "2.3.2"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "OliverEmoji/21"
@@ -40,6 +40,13 @@ PLUGIN_UPDATE_URLS = [
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+]
+
+SPEED_PLUGIN_URLS = [
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy_speed.plugin",
 ]
 
 
