@@ -1,1 +1,1 @@
-vless://f90b7d43-69e2-4b46-a672-8029bc6796a2@ee.h1cloud.net:25895?encryption=none&security=reality&sni=www.samsung.com&fp=chrome&pbk=jOVKSP-bS9OkILJ8Epz8hadh6qhavCrOiJYeF0NCn0k&sid=a73f0410d728c823&type=tcp&headerType=none#%F0%9F%87%AA%F0%9F%87%AA%20Estonia%2C%20Tallinn%20%7C%20%5BBL%5D
+vless://6a6ac9b3-b336-44f7-a1c4-a03d6c2fae9e@45.91.52.112:2027?security=reality&sni=reref.skysafe.online&fp=firefox&pbk=EApxy12MeXpqt-78odxizwcXT6hX9f8XeAcbMDVRAV0&sid=6ba7b8109dad11d1&type=grpc&serviceName=grpcsvc#%F0%9F%87%AA%F0%9F%87%B8%20Spain%20%7C%20%F0%9F%8C%90%20%5B%2ACIDR%5D
