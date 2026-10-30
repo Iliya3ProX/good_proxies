@@ -1,1 +1,1 @@
-vless://6a6ac9b3-b336-44f7-a1c4-a03d6c2fae9e@45.91.52.112:2027?security=reality&sni=reref.skysafe.online&fp=firefox&pbk=EApxy12MeXpqt-78odxizwcXT6hX9f8XeAcbMDVRAV0&sid=6ba7b8109dad11d1&type=grpc&serviceName=grpcsvc#%F0%9F%87%AA%F0%9F%87%B8%20Spain%20%7C%20%F0%9F%8C%90%20%5B%2ACIDR%5D
+vless://5f1c2e83-d4aa-4f10-81e9-e0ccc018974c@188.225.83.133:443?security=reality&sni=xnodtwx.artemida.live&fp=firefox&pbk=JqmkP6Fys7jN2Fu1iDJuWKVNPhlgHfy_pj1DHFVKVhw&sid=a1b2c3d4e5f6a7b8&type=grpc&serviceName=#%F0%9F%87%A9%F0%9F%87%AA%20Germany%20%5B%2ACIDR%5D
