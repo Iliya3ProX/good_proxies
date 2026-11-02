@@ -1,3 +1,2 @@
 vless://1b7ee703-fa08-4305-8469-ae3e30e61e44@45.132.176.61:443?flow=xtls-rprx-vision&security=reality&sni=sopelka.yandex-api.com&fp=firefox&pbk=_qSbW4JL4Ffqvj25vX-6a2ul9Qlj6PBdlF0ghsf_0RQ&sid=a9dc98a7dc87a7dc#%F0%9F%87%AE%F0%9F%87%AA%20Ireland%20%5B%2ACIDR%5D
 vless://b877b58f-5995-4b25-abec-3213a2f95512@185.86.145.142:2096?encryption=none&fp=firefox&host=cdn.freetato-converting.ru&path=/chxh&security=tls&sni=cdn.freetato-converting.ru&type=xhttp#%F0%9F%87%B3%F0%9F%87%B1%20The%20Netherlands%20%5B%2ACIDR%5D%20VK
-vless://36592d47-b9f5-4e8f-949e-45ac05472aab@141.193.213.21:2083?host=site.check-looks.space&insecure=0&path=%2F&security=tls&sni=site.check-looks.space&type=ws&fp=chrome#%F0%9F%87%A9%F0%9F%87%AA%20Germany%2C%20Falkenstein%20%7C%20%5BBL%5D
