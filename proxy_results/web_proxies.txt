@@ -1,10 +1,2 @@
-tg://webproxy?server=41play.live&secret=b3bb7260db405b8ba98bcbc11d6daaf5
-tg://webproxy?server=moscow-owl.hi-l.im&secret=9fd84ffe082284dfe8b28d44c510387f&via=https
-tg://webproxy?server=tavienne.xyz&secret=dd0ac7290872004ac465cfea1b05d5ffb8
-tg://webproxy?server=drovane.xyz&secret=dd7ec606b60fd41b56a57e7e47671c41bd
-tg://webproxy?server=c9d8n.librava.click&secret=dd5aa53c09879423668987d232864cb2ab
-tg://webproxy?server=web.suslik-cloud.com&secret=dd72a2c47b19adfed97c95bc4fdd38b83f
 tg://webproxy?server=nov.webvirt.cloud&secret=2cb152167b45c9a010c8109fef2d8fd6&via=websocket
 tg://webproxy?server=eu.compono.online&secret=0b03d5b08b5592096de09e41ebbfc137&via=websocket
-tg://webproxy?server=web.es.nvrsk-not-news.ru&secret=9f28808baf85ae93956b1dd3eb9ee0d0&via=https
-tg://webproxy?server=stone27.home.kg&secret=9fc8d7d1aeee614bd5fa3b760da44dd3&via=websocket
