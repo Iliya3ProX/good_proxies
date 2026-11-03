@@ -1,1 +1,1 @@
-vless://35c9f200-7520-4005-b78e-f8a2fb9f68f7@212.43.156.201:8444?security=tls&sni=nl17.meshbeat.online&alpn=http%2F1.1&type=ws&path=%2Fapi%2Fv1%2Fdevices%2Fe6a59ebbfc%2Ftelemetry&host=nl17.meshbeat.online&fp=chrome#%F0%9F%87%B3%F0%9F%87%B1%20The%20Netherlands%2C%20Oude%20Meer%20%7C%20%F0%9F%8C%90%20%7C%20%5BBL%5D
+vless://1b7ee703-fa08-4305-8469-ae3e30e61e44@45.132.176.61:443?flow=xtls-rprx-vision&security=reality&sni=sopelka.yandex-api.com&fp=firefox&pbk=_qSbW4JL4Ffqvj25vX-6a2ul9Qlj6PBdlF0ghsf_0RQ&sid=a9dc98a7dc87a7dc#%F0%9F%87%AE%F0%9F%87%AA%20Ireland%20%5B%2ACIDR%5D
