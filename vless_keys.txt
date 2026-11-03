@@ -1,0 +1,1 @@
+vless://09f30c46-3964-41ce-882a-72aee83ddd42@hw6.divarkhaghazi.com:465?encryption=none&host=hw6.divarkhaghazi.com.&path=%2F&security=tls&sni=hw6.divarkhaghazi.com.&type=ws#%F0%9F%8C%90%20Anycast-IP%20%7C%20%F0%9F%87%B8%F0%9F%87%AC%20%7C%20%5BBL%5D
