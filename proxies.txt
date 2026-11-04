@@ -1,0 +1,1 @@
+tg://proxy?server=1.2.3.4&port=443&secret=ee1111111111111111#Tier3
