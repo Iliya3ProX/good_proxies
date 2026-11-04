@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "name": "Good Proxies",
+  "description": "Сборщик рабочих прокси, замер скорости и крипто-проверки для exteraGram.",
+  "author": "@MouXoziain",
+  "homepage": "https://github.com/Iliya3ProX/good_proxies",
+  "plugins": [
+    {
+      "id": "good_proxy",
+      "name": "Good Proxy",
+      "description": "Сборщик рабочих прокси из открытых источников.",
+      "author": "@MouXoziain & Gemini",
+      "version": "2.4.0",
+      "category": [
+        "tools"
+      ],
+      "file": "good_proxy.plugin",
+      "app_version": ">=12.5.1",
+      "sdk_version": ">=1.4.4.3",
+      "icon": "OliverEmoji/21",
+      "sha256": "0c5bd5961329c6a87a55e8b1522a05ba14c5e04e43e853316c2d45affad650b9",
+      "size": 134835,
+      "updated_at": "2026-11-04T22:25:42Z"
+    },
+    {
+      "id": "good_proxy_speed",
+      "name": "Good Proxy Speed",
+      "description": "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup).",
+      "author": "@MouXoziain & Gemini",
+      "version": "1.0.4",
+      "category": [
+        "tools"
+      ],
+      "file": "good_proxy_speed.plugin",
+      "app_version": ">=12.5.1",
+      "sdk_version": ">=1.4.4.3",
+      "icon": "msg2_speed",
+      "sha256": "c7ad04335d141eb2f367f0fec3a2bf80e2f294b708e855c2cd040c22e50831e7",
+      "size": 45510,
+      "updated_at": "2026-11-04T22:25:42Z"
+    },
+    {
+      "id": "th3_proxy_tools",
+      "name": "Th3ProxyTools",
+      "description": "Надёжный массовый пинг, анти-DPI инспектор, чистка списка, импорт/экспорт, флаги стран. Подробности — в настройках плагина.",
+      "author": "@th3_nek1t",
+      "version": "3.1.1",
+      "category": [
+        "tools"
+      ],
+      "file": "th3_proxy_tools.plugin",
+      "app_version": ">=11.12.0",
+      "icon": "exteraPlugins/1",
+      "sha256": "b5b5d8f4395971def28902c344136da8e52d5b3c6f612e521c3c92eac5a1bbbe",
+      "size": 97682,
+      "updated_at": "2026-11-04T22:23:16Z"
+    }
+  ]
+}
