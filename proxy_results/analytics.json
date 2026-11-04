@@ -1,15 +1,15 @@
 {
- "generated_at": "2026-11-05 00:25",
+ "generated_at": "2026-11-05 00:27",
  "check_interval_hours": 6,
  "pool": {
-  "total": 2,
-  "alive": 1,
+  "total": 1,
+  "alive": 0,
   "dead": 1
  },
  "tiers": {
   "tier1": 0,
   "tier2": 0,
-  "tier3": 1,
+  "tier3": 0,
   "slow": 0
  },
  "nodes": {
@@ -19,9 +19,9 @@
   "alive": 0
  },
  "ping": {
-  "best": 42,
-  "p50": 42,
-  "avg": 42
+  "best": 0,
+  "p50": 0,
+  "avg": 0
  },
  "speed": {
   "tested": 0,
