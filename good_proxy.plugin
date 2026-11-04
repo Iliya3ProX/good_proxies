@@ -169,7 +169,8 @@ def _format_analytics_text(a):
             lines.append("")
             lines.append(f"Пинг: лучший {ping.get('best', 0)}мс · медиана {ping.get('p50', 0)}мс · средний {ping.get('avg', 0)}мс")
         if speed.get("tested"):
-            lines.append(f"Скорость: {speed.get('tested', 0)} проверено · средняя {speed.get('avg_mbs', 0)} МБ/с · топ {speed.get('best_mbs', 0)} МБ/с")
+            lines.append(f"Живые по замерам скорости: {speed.get('tested', 0)} из {alive} ({speed.get('alive_share', 0)}%)")
+            lines.append(f"Скорость: средняя {speed.get('avg_mbs', 0)} МБ/с · топ {speed.get('best_mbs', 0)} МБ/с")
 
         countries = a.get("countries") or []
         if countries:
