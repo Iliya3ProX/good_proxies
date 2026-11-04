@@ -25,6 +25,7 @@ __version__ = "1.0.4"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
+__category__ = ["tools"]
 
 PLUGIN_UPDATE_URLS = [
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy_speed.plugin",
