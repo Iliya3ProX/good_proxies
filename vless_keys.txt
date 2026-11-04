@@ -1,1 +1,1 @@
-vless://40945325-a133-41ef-8fc3-2e726678ad52@185.86.145.37:443?security=tls&sni=rar.rtkdvbr.cc&alpn=http%2F1.1&type=ws&path=%2Famws&host=rar.rtkdvbr.cc&fp=ios#%F0%9F%87%B3%F0%9F%87%B1%20The%20Netherlands%20%7C%20%5B%2ACIDR%5D%20VK
+vless://0ef68b97-f878-4cea-b756-c56ea3632851@news.zoom.us:2087?path=%2F&security=tls&alpn=http%2F1.1&encryption=none&host=free.vkehi.store&type=ws&sni=free.vkehi.store&fp=android#%F0%9F%87%B1%F0%9F%87%B0%20Sri%20Lanka%2C%20Battaramulla%20%7C%20%5BBL%5D
