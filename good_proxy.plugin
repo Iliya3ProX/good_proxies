@@ -24,6 +24,7 @@ __author__ = "@MouXoziain & Gemini"
 __version__ = "2.4.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
+__category__ = ["tools"]
 __icon__ = "OliverEmoji/21"
 
 # All mirrors point to the same upstream repository. The old CDN entries had
