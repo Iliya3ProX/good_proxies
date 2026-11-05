@@ -1,2 +1,0 @@
-vless://53de05e9-8de3-48ae-9036-dcb203d4925c@196.240.125.5:8443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=api-v2-6aeb73b7.vmagnum.win&type=tcp&fp=chrome#%F0%9F%87%B3%F0%9F%87%B1%20The%20Netherlands%2C%20Amsterdam%20%7C%20%5BBL%5D
-vless://53de05e9-8de3-48ae-9036-dcb203d4925c@196.240.125.251:8443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=api-v2-6aeb73b7.vmagnum.win&type=tcp&fp=chrome#%F0%9F%87%B3%F0%9F%87%B1%20The%20Netherlands%2C%20Amsterdam%20%7C%20%5BBL%5D
