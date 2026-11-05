@@ -1,2 +1,1 @@
-vless://existing@1.1.1.1:443#Existing
-vless://new_key@2.2.2.2:8443?security=reality#New1
+vless://53de05e9-8de3-48ae-9036-dcb203d4925c@107.150.93.22:443?security=tls&sni=53de05e9.ferrin.uk&fp=firefox&type=xhttp&path=%2F&mode=stream-one#%F0%9F%87%AB%F0%9F%87%AE%20Finland%2C%20Helsinki%20%7C%20%5BBL%5D
