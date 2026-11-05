@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __category__ = ["tools"]
@@ -30,25 +30,25 @@ __icon__ = "OliverEmoji/21"
 # All mirrors point to the same upstream repository. The old CDN entries had
 # missing/shortened owner names and therefore returned 404 or unrelated pages.
 PROXIES_URLS = [
-    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
 ]
 
 # Компактная статистика пула, генерируется чекером в proxy_results/analytics.json
 ANALYTICS_URLS = [
-    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxy_results/analytics.json",
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxy_results/analytics.json",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxy_results/analytics.json",
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxy_results/analytics.json",
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxy_results/analytics.json",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxy_results/analytics.json",
 ]
 
 PLUGIN_UPDATE_URLS = [
-    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
-    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
-    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
     "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/good_proxy.plugin",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/good_proxy.plugin",
 ]
 
 SPEED_PLUGIN_URLS = [
