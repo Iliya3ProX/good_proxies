@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.4.3"
+__version__ = "2.4.4"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __category__ = ["tools"]
@@ -61,8 +61,8 @@ SPEED_PLUGIN_URLS = [
 # SHA-256 эталонной версии speed-плагина (обновляется синхронно с этим плагином).
 # Если версия файла совпала с эталонной, а хеш нет — подмена, установка блокируется.
 # Новая версия без эталонного хеша ставится с предупреждением.
-SPEED_PLUGIN_PIN_VERSION = "1.0.5"
-SPEED_PLUGIN_SHA256 = "73b9ae9d49cc6398bbd9b1cda4f41c8299dad236f51a6a741dc9ea4343cb0ba5"
+SPEED_PLUGIN_PIN_VERSION = "1.0.6"
+SPEED_PLUGIN_SHA256 = "79aa1694404d0974c02f36c656eda552202a7928f0a1f1d9ebb92a80f96ee272"
 
 
 def _copy_to_clipboard(text, label="GoodProxy_Proxies"):
