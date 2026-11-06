@@ -1,4 +1,5 @@
 import os
+import random
 import re
 import sys
 import threading
@@ -21,7 +22,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -520,23 +521,30 @@ class GoodProxySpeedPlugin(BasePlugin):
         try:
             size_idx = int(self.get_setting("speed_test_chunks", 2))
             sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
-            labels = ["2 МБ", "5 МБ", "10 МБ"]
             if size_idx < 0 or size_idx >= len(sizes):
                 size_idx = 2
-            target_size = sizes[size_idx]
-            label = labels[size_idx]
+            base_size = sizes[size_idx]
+
+            # Ровные круглые размеры и нулевое содержимое иногда не проходят
+            # upload (фильтры режут однобайтовый паттерн) — генерируем случайные
+            # байты и «плавающий» размер: база ± до 512 КБ, но не меньше 1 МБ
+            target_size = base_size + random.randint(-512 * 1024, 512 * 1024)
+            target_size = max(1024 * 1024, target_size)
 
             ApplicationLoader = jclass("org.telegram.messenger.ApplicationLoader")
             cache_dir = ApplicationLoader.applicationContext.getCacheDir().getAbsolutePath()
-            file_path = os.path.join(cache_dir, "speed_test_asset")
+            file_path = os.path.join(cache_dir, "speed_test_asset.bin")
 
-            chunk = b"\x00" * (64 * 1024)
+            chunk_size = 64 * 1024
             with open(file_path, "wb") as f:
                 written = 0
                 while written < target_size:
-                    to_write = min(len(chunk), target_size - written)
-                    f.write(chunk[:to_write])
+                    to_write = min(chunk_size, target_size - written)
+                    f.write(os.urandom(to_write))
                     written += to_write
+
+            actual_mb = os.path.getsize(file_path) / (1024.0 * 1024.0)
+            label = f"{actual_mb:.1f} МБ"
 
             peer_id = get_user_config().getClientUserId()
             caption = f"Good Proxy — тестовый файл ({label})"
