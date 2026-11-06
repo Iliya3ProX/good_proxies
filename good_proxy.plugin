@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.4.4"
+__version__ = "2.4.5"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __category__ = ["tools"]
@@ -1071,7 +1071,7 @@ def _apply_icon(cell, tv_name, icon_name):
         Theme = jclass("org.telegram.ui.ActionBar.Theme")
         drawable = ctx.getResources().getDrawable(res_id).mutate()
         drawable.setColorFilter(jclass("android.graphics.PorterDuffColorFilter")(
-            Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), 
+            Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon),
             jclass("android.graphics.PorterDuff").Mode.MULTIPLY
         ))
         is_rtl = jclass("org.telegram.messenger.LocaleController").isRTL
@@ -1079,6 +1079,28 @@ def _apply_icon(cell, tv_name, icon_name):
         tv.setCompoundDrawablePadding(jclass("org.telegram.messenger.AndroidUtilities").dp(16))
     except Exception:
         pass
+
+
+def _jbox_bool(v):
+    """Боксинг Python bool в java.lang.Boolean (для setResult методов с boolean)."""
+    try:
+        return Boolean(True if v else False)
+    except NameError:
+        try:
+            return jclass("java.lang.Boolean").valueOf(True if v else False)
+        except Exception:
+            return True if v else False
+
+
+def _jbox_long(v):
+    """Боксинг Python int в java.lang.Long (для setResult методов с long)."""
+    try:
+        return Long(int(v))
+    except NameError:
+        try:
+            return jclass("java.lang.Long").valueOf(int(v))
+        except Exception:
+            return int(v)
 
 
 def _unwrap_class(cls_obj):
@@ -1220,8 +1242,12 @@ class ProxyManagerPlugin(BasePlugin):
                     try:
                         lv = get_private_field(act, "listView")
                         old_l = get_private_field(lv, "onItemClickListener")
-                        if old_l and "PMClickListener" in str(old_l.getClass().getName()):
-                            return
+                        if old_l is not None:
+                            lname = str(old_l.getClass().getName())
+                            # свой враппер уже стоит (SpeedPMClickListener —
+                            # чужой, его оборачиваем)
+                            if "PMClickListener" in lname and "SpeedPMClickListener" not in lname:
+                                return
 
                         class PMClickListener(dynamic_proxy(jclass("org.telegram.ui.Components.RecyclerListView$OnItemClickListener"))):
                             def __init__(self):
@@ -1242,6 +1268,10 @@ class ProxyManagerPlugin(BasePlugin):
                                     plugin._on_cleanup_nonworking_click()
                                 elif diff == 5:
                                     plugin._on_analytics_click()
+                                elif diff >= 6:
+                                    # ряды 6+ — good_proxy_speed.plugin,
+                                    # отдаём клик дальше по цепочке врапперов
+                                    return old_l.onItemClick(view, pos) if old_l else None
 
                         lv.setOnItemClickListener(PMClickListener())
                     except Exception:
@@ -1253,6 +1283,9 @@ class ProxyManagerPlugin(BasePlugin):
                     self.hook_method(m, ClickHook())
 
             # Хуки на адаптер (кнопки внизу списка)
+            # Ряды 0..5 — наши (0 — разделитель, 1..5 — кнопки), 6..8 — ряды
+            # good_proxy_speed.plugin. Координация порядконезависима: каждый
+            # хук трогает только свой диапазон, CountHook'и идемпотентны.
             AdapterCls = _resolve_class("org.telegram.ui.ProxyListActivity$ListAdapter")
             if AdapterCls:
                 def _get_orig_count(param):
@@ -1261,12 +1294,39 @@ class ProxyManagerPlugin(BasePlugin):
 
                 class CountHook(MethodHook):
                     def after_hooked_method(self, param):
-                        param.setResult(Integer(int(param.getResult()) + 6))
+                        orig = _get_orig_count(param)
+                        if orig is None:
+                            return
+                        current = int(param.getResult())
+                        if current > orig + 6:
+                            return  # speed-плагин уже добавил свои ряды (+3)
+                        param.setResult(Integer(orig + 6))
 
                 class ViewTypeHook(MethodHook):
                     def before_hooked_method(self, param):
-                        if (orig := _get_orig_count(param)) is not None and (pos := int(param.args[0])) >= orig:
-                            param.setResult(Integer(0 if pos - orig == 0 else 1))
+                        if (orig := _get_orig_count(param)) is not None:
+                            diff = int(param.args[0]) - orig
+                            if 0 <= diff < 6:
+                                param.setResult(Integer(0 if diff == 0 else 1))
+
+                class EnabledHook(MethodHook):
+                    # Новый ProxyListActivity возвращает isEnabled=False для
+                    # всех позиций за пределами rowCount активности →
+                    # onChildAttachedToWindow делает child.setEnabled(false)
+                    # и клики по нашим рядам не доходят до листенера.
+                    def before_hooked_method(self, param):
+                        if (orig := _get_orig_count(param)) is not None:
+                            if int(param.args[0].getAdapterPosition()) >= orig:
+                                param.setResult(_jbox_bool(True))
+
+                class IdHook(MethodHook):
+                    # setHasStableIds(true) + дефолт getItemId = -7 для всех
+                    # доп. рядов → коллизия stable ID («Two different
+                    # ViewHolders have the same stable ID»).
+                    def before_hooked_method(self, param):
+                        if (orig := _get_orig_count(param)) is not None:
+                            if (diff := int(param.args[0]) - orig) >= 0:
+                                param.setResult(_jbox_long(-100 - diff))
 
                 class BindHook(MethodHook):
                     def before_hooked_method(self, param):
@@ -1303,6 +1363,10 @@ class ProxyManagerPlugin(BasePlugin):
                         self.hook_method(m, ViewTypeHook())
                     elif m.getName() == "onBindViewHolder" and len(m.getParameterTypes()) == 2:
                         self.hook_method(m, BindHook())
+                    elif m.getName() == "isEnabled" and len(m.getParameterTypes()) == 1:
+                        self.hook_method(m, EnabledHook())
+                    elif m.getName() == "getItemId" and len(m.getParameterTypes()) == 1:
+                        self.hook_method(m, IdHook())
 
             _log(f"Plugin v{__version__} loaded successfully")
             try:

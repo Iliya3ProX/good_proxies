@@ -23,7 +23,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -289,6 +289,49 @@ def _proxy_settings_fields(settings):
         return None
 
 
+def _apply_icon(cell, tv_name, icon_name):
+    """Иконка в TextSettingsCell (аналогично good_proxy.plugin)."""
+    try:
+        tv = get_private_field(cell, tv_name)
+        ctx = cell.getContext()
+        res_id = ctx.getResources().getIdentifier(icon_name, "drawable", ctx.getPackageName())
+        if not tv or not res_id:
+            return
+        Theme = jclass("org.telegram.ui.ActionBar.Theme")
+        drawable = ctx.getResources().getDrawable(res_id).mutate()
+        drawable.setColorFilter(jclass("android.graphics.PorterDuffColorFilter")(
+            Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon),
+            jclass("android.graphics.PorterDuff").Mode.MULTIPLY
+        ))
+        is_rtl = jclass("org.telegram.messenger.LocaleController").isRTL
+        tv.setCompoundDrawablesWithIntrinsicBounds(None, None, drawable, None) if is_rtl else tv.setCompoundDrawablesWithIntrinsicBounds(drawable, None, None, None)
+        tv.setCompoundDrawablePadding(jclass("org.telegram.messenger.AndroidUtilities").dp(16))
+    except Exception:
+        pass
+
+
+def _jbox_bool(v):
+    """Боксинг Python bool в java.lang.Boolean (для setResult boolean-методов)."""
+    try:
+        return Boolean(True if v else False)
+    except NameError:
+        try:
+            return jclass("java.lang.Boolean").valueOf(True if v else False)
+        except Exception:
+            return True if v else False
+
+
+def _jbox_long(v):
+    """Боксинг Python int в java.lang.Long (для setResult long-методов)."""
+    try:
+        return Long(int(v))
+    except NameError:
+        try:
+            return jclass("java.lang.Long").valueOf(int(v))
+        except Exception:
+            return int(v)
+
+
 class GoodProxySpeedPlugin(BasePlugin):
     def on_plugin_load(self):
         try:
@@ -311,44 +354,124 @@ class GoodProxySpeedPlugin(BasePlugin):
             except Exception as e:
                 _log(f"add MAIN_MENU error: {e}")
 
-            # Кнопки теста в меню выбора прокси (ActionBar списка):
-            # отдельные item'ы вместо рядов списка — good_proxy.plugin уже
-            # занимает ряды и клик-листенер, дублирование сломало бы его кнопки
+            # Кнопки теста рядами списка ProxyListActivity, после блока
+            # good_proxy.plugin: diff 6 — разделитель, 7 — замер скорости,
+            # 8 — генерация тестового файла. Хуки порядконезависимы с хуками
+            # good_proxy.plugin (каждый трогает только свой диапазон, оба
+            # CountHook'а идемпотентны). Клик-враппер делегирует чужие ряды
+            # по цепочке, поэтому порядок загрузки плагинов не важен.
             try:
+                AdapterCls = find_class("org.telegram.ui.ProxyListActivity$ListAdapter")
                 ProxyListActivityCls = find_class("org.telegram.ui.ProxyListActivity")
+                if AdapterCls and ProxyListActivityCls:
+                    def _speed_orig_count(param):
+                        act = get_private_field(param.thisObject, "this$0")
+                        return int(get_private_field(act, "rowCount") or 0) if act else None
 
-                class SpeedActionBarHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        act = param.thisObject
-                        try:
-                            ab = get_private_field(act, "actionBar")
-                            if not ab:
+                    class SpeedCountHook(MethodHook):
+                        def after_hooked_method(self, param):
+                            orig = _speed_orig_count(param)
+                            if orig is None:
                                 return
-                            menu = ab.createMenu()
-                            ctx = act.getParentActivity() or getattr(act, "getContext", lambda: None)()
-                            if not ctx:
-                                return
-                            iw = jclass("org.telegram.messenger.AndroidUtilities").dp(40)
-                            MENU_SPEED_ID = 999_777
-                            MENU_ASSET_ID = 999_776
-                            if menu.getItem(MENU_SPEED_ID) is None:
-                                res_id = ctx.getResources().getIdentifier("msg2_speed", "drawable", ctx.getPackageName())
-                                it = menu.addItemWithWidth(MENU_SPEED_ID, res_id if res_id else 0, iw, "Замер скорости активного прокси")
-                                it.setOnClickListener(plugin._speed_menu_click_factory(MENU_SPEED_ID))
-                            if menu.getItem(MENU_ASSET_ID) is None:
-                                res_id = ctx.getResources().getIdentifier("msg_download", "drawable", ctx.getPackageName())
-                                it2 = menu.addItemWithWidth(MENU_ASSET_ID, res_id if res_id else 0, iw, "Сгенерировать тестовый файл")
-                                it2.setOnClickListener(plugin._speed_menu_click_factory(MENU_ASSET_ID))
-                        except Exception as e:
-                            _log(f"speed actionbar add error: {e}")
+                            current = int(param.getResult())
+                            # блок good_proxy.plugin (+6) резервируем всегда,
+                            # даже если его хук ещё не отработал
+                            param.setResult(Integer(max(current, orig + 6) + 3))
 
-                hooked = False
-                for m in ProxyListActivityCls.getDeclaredMethods():
-                    if m.getName() == "createView":
-                        self.hook_method(m, SpeedActionBarHook())
-                        hooked = True
-                if hooked:
-                    _log("Speed menu hooked into ProxyListActivity")
+                    class SpeedViewTypeHook(MethodHook):
+                        def before_hooked_method(self, param):
+                            if (orig := _speed_orig_count(param)) is not None:
+                                diff = int(param.args[0]) - orig
+                                if diff >= 6:
+                                    param.setResult(Integer(0 if diff == 6 else 1))
+
+                    class SpeedBindHook(MethodHook):
+                        def before_hooked_method(self, param):
+                            if (orig := _speed_orig_count(param)) is not None:
+                                if int(param.args[1]) - orig >= 6:
+                                    param.setResult(None)
+
+                        def after_hooked_method(self, param):
+                            if (orig := _speed_orig_count(param)) is None:
+                                return
+                            cpos = int(param.args[1]) - orig
+                            if cpos < 7:
+                                return
+                            cell = param.args[0].itemView
+                            try:
+                                if cpos == 7:
+                                    cell.setText("Замер скорости активного прокси", True)
+                                    _apply_icon(cell, "textView", "msg2_speed")
+                                elif cpos == 8:
+                                    cell.setText("Сгенерировать тестовый файл", True)
+                                    _apply_icon(cell, "textView", "msg_download")
+                            except Exception as e:
+                                _log(f"speed bind row error: {e}")
+
+                    class SpeedEnabledHook(MethodHook):
+                        def before_hooked_method(self, param):
+                            if (orig := _speed_orig_count(param)) is not None:
+                                if int(param.args[0].getAdapterPosition()) - orig >= 6:
+                                    param.setResult(_jbox_bool(True))
+
+                    class SpeedIdHook(MethodHook):
+                        def before_hooked_method(self, param):
+                            if (orig := _speed_orig_count(param)) is not None:
+                                if (diff := int(param.args[0]) - orig) >= 6:
+                                    param.setResult(_jbox_long(-200 - diff))
+
+                    class SpeedClickHook(MethodHook):
+                        def after_hooked_method(self, param):
+                            act = param.thisObject
+                            try:
+                                lv = get_private_field(act, "listView")
+                                old_l = get_private_field(lv, "onItemClickListener")
+                                if old_l is not None and "SpeedPMClickListener" in str(old_l.getClass().getName()):
+                                    return
+
+                                class SpeedPMClickListener(dynamic_proxy(jclass("org.telegram.ui.Components.RecyclerListView$OnItemClickListener"))):
+                                    def __init__(self):
+                                        super().__init__()
+
+                                    def onItemClick(self, view, pos):
+                                        orig = int(get_private_field(act, "rowCount") or 0)
+                                        diff = pos - orig
+                                        if diff < 6:
+                                            # ряды 0..orig+5 — активность и good_proxy.plugin
+                                            return old_l.onItemClick(view, pos) if old_l else None
+                                        if diff == 7:
+                                            plugin._on_check_current_proxy_speed(None)
+                                        elif diff == 8:
+                                            plugin._on_generate_speed_file_click(None)
+
+                                lv.setOnItemClickListener(SpeedPMClickListener())
+                            except Exception as e:
+                                _log(f"speed row click hook error: {e}")
+
+                    adapter_hooked = False
+                    for m in AdapterCls.getDeclaredMethods():
+                        if m.getName() == "getItemCount":
+                            self.hook_method(m, SpeedCountHook())
+                            adapter_hooked = True
+                        elif m.getName() == "getItemViewType":
+                            self.hook_method(m, SpeedViewTypeHook())
+                        elif m.getName() == "onBindViewHolder" and len(m.getParameterTypes()) == 2:
+                            self.hook_method(m, SpeedBindHook())
+                        elif m.getName() == "isEnabled" and len(m.getParameterTypes()) == 1:
+                            self.hook_method(m, SpeedEnabledHook())
+                        elif m.getName() == "getItemId" and len(m.getParameterTypes()) == 1:
+                            self.hook_method(m, SpeedIdHook())
+
+                    click_hooked = False
+                    for m in ProxyListActivityCls.getDeclaredMethods():
+                        if m.getName() == "createView":
+                            self.hook_method(m, SpeedClickHook())
+                            click_hooked = True
+
+                    if adapter_hooked and click_hooked:
+                        _log("Speed rows hooked into ProxyListActivity list")
+                    else:
+                        _log(f"Speed rows hook incomplete: adapter={adapter_hooked} click={click_hooked}")
             except Exception as e:
                 _log(f"speed proxy list hook error: {e}")
 
@@ -390,12 +513,7 @@ class GoodProxySpeedPlugin(BasePlugin):
             except Exception as e:
                 _log(f"create_settings Selector error: {e}")
 
-            rows.append(Text(
-                text="Сгенерировать файл для теста скорости",
-                subtext="Создаст файл без расширения и отправит его в «Избранное».",
-                icon="msg_download",
-                on_click=self._on_generate_speed_file_click,
-            ))
+            # «Сгенерировать тестовый файл» перенесено в меню выбора прокси
             rows.append(Switch(
                 key="speed_test_set_proxy_name",
                 text="Записывать скорость в название",
@@ -527,24 +645,17 @@ class GoodProxySpeedPlugin(BasePlugin):
         guide = (
             "Good Proxy Speed — замер реальной скорости:\n\n"
             "1. Подготовка:\n"
-            "Нажмите «Сгенерировать файл для теста скорости». Плагин создаст бинарный файл без расширения "
-            "и отправит его в ваше «Избранное». ID файла привяжется автоматически.\n\n"
+            "Откройте меню выбора прокси и нажмите «Сгенерировать тестовый файл» (внизу списка). "
+            "Плагин создаст txt-файл со случайным содержимым и отправит его в ваше «Избранное». "
+            "ID файла привяжется автоматически.\n\n"
             "2. Замер:\n"
-            "• Кнопка «Скорость текущего прокси» замеряет активное соединение.\n"
-            "• Кнопка «Проверить скорость всех прокси» выполняет пакетный тест всех доступных прокси.\n\n"
+            "• В меню выбора прокси: «Замер скорости активного прокси» — замеряет выделенный прокси.\n"
+            "• «Скорость текущего прокси» в главном меню — замеряет активное соединение.\n\n"
             "3. Технология TCP Window Warmup:\n"
             "Первый чанк (512 КБ) скачивается для прогрева соединения и раскрытия окна перегрузки TCP (cwnd). "
             "Секундомер включается со второго чанка, обеспечивая чистый и точный замер без ограничений RTT."
         )
         run_on_ui_thread(lambda: _show_modal_alert("Инструкция Good Proxy Speed", guide, "Понятно"))
-
-    def _speed_menu_click_factory(self, which):
-        def _click(_v=None):
-            if which == 999_777:
-                self._on_check_current_proxy_speed(_v)
-            elif which == 999_776:
-                self._on_generate_speed_file_click(_v)
-        return _click
 
     def _on_generate_speed_file_click(self, _view=None):
         _notify("info", "Генерирую тестовый файл...")

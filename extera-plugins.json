@@ -10,7 +10,7 @@
       "name": "Good Proxy",
       "description": "Сборщик рабочих прокси из открытых источников.",
       "author": "@MouXoziain & Gemini",
-      "version": "2.4.4",
+      "version": "2.4.5",
       "category": [
         "tools"
       ],
@@ -18,16 +18,16 @@
       "app_version": ">=12.5.1",
       "sdk_version": ">=1.4.4.3",
       "icon": "OliverEmoji/21",
-      "sha256": "06fc17c8a7a1f3b92ba307f8f9dd9c148965b72928c4f776b46a61e5a21e1cf0",
-      "size": 134083,
-      "updated_at": "2026-11-06T20:36:45Z"
+      "sha256": "a3ae0b016a729d06554f6bedd969ae9327ead61e5abde39f62a37dfe7673fc7f",
+      "size": 134854,
+      "updated_at": "2026-11-06T21:35:17Z"
     },
     {
       "id": "good_proxy_speed",
       "name": "Good Proxy Speed",
       "description": "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup).",
       "author": "@MouXoziain & Gemini",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "category": [
         "tools"
       ],
@@ -35,9 +35,9 @@
       "app_version": ">=12.5.1",
       "sdk_version": ">=1.4.4.3",
       "icon": "msg2_speed",
-      "sha256": "b4a91aca58793d94a8a8910c19c5ce2a009a2107ccf81bc72c02b12f241d82b1",
-      "size": 50209,
-      "updated_at": "2026-11-06T21:00:52Z"
+      "sha256": "7eccf87338dbebcb73f298ba7945f9a09e8be8f28f1632c6fbc36a4629d919c2",
+      "size": 56422,
+      "updated_at": "2026-11-06T21:35:17Z"
     },
     {
       "id": "th3_proxy_tools",
