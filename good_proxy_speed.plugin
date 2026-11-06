@@ -23,7 +23,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -609,8 +609,24 @@ class GoodProxySpeedPlugin(BasePlugin):
                                 if doc is not None:
                                     doc_size = int(getattr(doc, "size", 0) or 0)
                                     msg_text = str(getattr(m, "message", "") or "")
+                                    file_name = ""
+                                    try:
+                                        attrs = getattr(doc, "attributes", None)
+                                        if attrs is not None:
+                                            try:
+                                                n_attrs = int(attrs.size())
+                                                attr_items = [attrs.get(i) for i in range(n_attrs)]
+                                            except Exception:
+                                                attr_items = list(attrs)
+                                            for a in attr_items:
+                                                if "Filename" in type(a).__name__:
+                                                    file_name = str(getattr(a, "file_name", "") or "")
+                                                    break
+                                    except Exception:
+                                        file_name = ""
                                     is_match = (
-                                        "Good Proxy" in msg_text
+                                        "speed_test_asset" in file_name
+                                        or "Good Proxy" in msg_text
                                         or "speed_test_asset" in msg_text
                                         or (expected_size > 0 and abs(doc_size - expected_size) < 4096)
                                     )
@@ -636,10 +652,8 @@ class GoodProxySpeedPlugin(BasePlugin):
         except Exception:
             pass
         try:
-            size_idx = int(self.get_setting("speed_test_chunks", 2))
-            sizes = [2 * 1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
-            expected = sizes[size_idx] if 0 <= size_idx < len(sizes) else 10 * 1024 * 1024
-            found_id = self._find_speed_test_message_in_saved(expected)
+            # размер файла теперь «плавающий» — ищем по имени speed_test_asset.*
+            found_id = self._find_speed_test_message_in_saved(0)
             if found_id > 0:
                 self.set_setting("speed_test_message_id", str(found_id))
                 return found_id
