@@ -23,7 +23,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.9"
+__version__ = "1.1.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -311,6 +311,47 @@ class GoodProxySpeedPlugin(BasePlugin):
             except Exception as e:
                 _log(f"add MAIN_MENU error: {e}")
 
+            # Кнопки теста в меню выбора прокси (ActionBar списка):
+            # отдельные item'ы вместо рядов списка — good_proxy.plugin уже
+            # занимает ряды и клик-листенер, дублирование сломало бы его кнопки
+            try:
+                ProxyListActivityCls = find_class("org.telegram.ui.ProxyListActivity")
+
+                class SpeedActionBarHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        act = param.thisObject
+                        try:
+                            ab = get_private_field(act, "actionBar")
+                            if not ab:
+                                return
+                            menu = ab.createMenu()
+                            ctx = act.getParentActivity() or getattr(act, "getContext", lambda: None)()
+                            if not ctx:
+                                return
+                            iw = jclass("org.telegram.messenger.AndroidUtilities").dp(40)
+                            MENU_SPEED_ID = 999_777
+                            MENU_ASSET_ID = 999_776
+                            if menu.getItem(MENU_SPEED_ID) is None:
+                                res_id = ctx.getResources().getIdentifier("msg2_speed", "drawable", ctx.getPackageName())
+                                it = menu.addItemWithWidth(MENU_SPEED_ID, res_id if res_id else 0, iw, "Замер скорости активного прокси")
+                                it.setOnClickListener(plugin._speed_menu_click_factory(MENU_SPEED_ID))
+                            if menu.getItem(MENU_ASSET_ID) is None:
+                                res_id = ctx.getResources().getIdentifier("msg_download", "drawable", ctx.getPackageName())
+                                it2 = menu.addItemWithWidth(MENU_ASSET_ID, res_id if res_id else 0, iw, "Сгенерировать тестовый файл")
+                                it2.setOnClickListener(plugin._speed_menu_click_factory(MENU_ASSET_ID))
+                        except Exception as e:
+                            _log(f"speed actionbar add error: {e}")
+
+                hooked = False
+                for m in ProxyListActivityCls.getDeclaredMethods():
+                    if m.getName() == "createView":
+                        self.hook_method(m, SpeedActionBarHook())
+                        hooked = True
+                if hooked:
+                    _log("Speed menu hooked into ProxyListActivity")
+            except Exception as e:
+                _log(f"speed proxy list hook error: {e}")
+
             try:
                 self.add_menu_item(MenuItemData(
                     menu_type=MenuItemType.DRAWER_MENU,
@@ -368,23 +409,6 @@ class GoodProxySpeedPlugin(BasePlugin):
                 default=True,
                 subtext="Проверять обновления плагина на GitHub при старте.",
                 icon="msg_retry",
-            ))
-            try:
-                rows.append(Divider())
-            except Exception:
-                pass
-            rows.append(Header(text="Действия"))
-            rows.append(Text(
-                text="Проверить скорость всех прокси",
-                subtext="Запустить пакетный замер доступных серверов.",
-                icon="msg2_speed",
-                on_click=self._on_check_all_proxy_speeds_click,
-            ))
-            rows.append(Text(
-                text="Скорость текущего прокси",
-                subtext="Запустить замер активного прокси-соединения.",
-                icon="msg2_speed",
-                on_click=self._on_check_current_proxy_speed,
             ))
             try:
                 rows.append(Divider())
@@ -513,6 +537,14 @@ class GoodProxySpeedPlugin(BasePlugin):
             "Секундомер включается со второго чанка, обеспечивая чистый и точный замер без ограничений RTT."
         )
         run_on_ui_thread(lambda: _show_modal_alert("Инструкция Good Proxy Speed", guide, "Понятно"))
+
+    def _speed_menu_click_factory(self, which):
+        def _click(_v=None):
+            if which == 999_777:
+                self._on_check_current_proxy_speed(_v)
+            elif which == 999_776:
+                self._on_generate_speed_file_click(_v)
+        return _click
 
     def _on_generate_speed_file_click(self, _view=None):
         _notify("info", "Генерирую тестовый файл...")
@@ -750,7 +782,7 @@ class GoodProxySpeedPlugin(BasePlugin):
         if message_id <= 0:
             return _notify(
                 "error",
-                "Тестовый файл не найден. Перейдите в настройки Good Proxy Speed и нажмите «Сгенерировать файл для теста скорости».",
+                "Тестовый файл не найден. В меню выбора прокси нажмите иконку загрузки — тестовый файл отправится в «Избранное».",
             )
         try:
             chunks_idx = int(self.get_setting("speed_test_chunks", 2))
@@ -774,7 +806,7 @@ class GoodProxySpeedPlugin(BasePlugin):
             if message_id <= 0:
                 return _notify(
                     "error",
-                    "Тестовый файл не найден. Перейдите в настройки Good Proxy Speed и нажмите «Сгенерировать файл для теста скорости».",
+                    "Тестовый файл не найден. В меню выбора прокси нажмите иконку загрузки — тестовый файл отправится в «Избранное».",
                 )
 
             SC = _shared_config()
