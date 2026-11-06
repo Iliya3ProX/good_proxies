@@ -20,14 +20,14 @@
       "icon": "OliverEmoji/21",
       "sha256": "d2fde9a6979fca16d61fd1a9b2e6609bdbb75a25045910e21863415b5cddf36a",
       "size": 131277,
-      "updated_at": "2026-11-06T18:14:27Z"
+      "updated_at": "2026-11-06T20:35:06Z"
     },
     {
       "id": "good_proxy_speed",
       "name": "Good Proxy Speed",
       "description": "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup).",
       "author": "@MouXoziain & Gemini",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "category": [
         "tools"
       ],
@@ -35,9 +35,9 @@
       "app_version": ">=12.5.1",
       "sdk_version": ">=1.4.4.3",
       "icon": "msg2_speed",
-      "sha256": "79aa1694404d0974c02f36c656eda552202a7928f0a1f1d9ebb92a80f96ee272",
-      "size": 45055,
-      "updated_at": "2026-11-06T18:14:27Z"
+      "sha256": "202467da00b1fe6cfde0866a2e58be41e1d47a94e714e8049fb5fabb660c5d1e",
+      "size": 46658,
+      "updated_at": "2026-11-06T20:35:06Z"
     },
     {
       "id": "th3_proxy_tools",
@@ -53,7 +53,7 @@
       "icon": "exteraPlugins/1",
       "sha256": "38e2e4434a2aa245a70dd2ec7845eeb8fe423b111b4de76c79248c1480b7642d",
       "size": 95376,
-      "updated_at": "2026-11-06T18:14:27Z"
+      "updated_at": "2026-11-06T20:35:06Z"
     }
   ]
 }
