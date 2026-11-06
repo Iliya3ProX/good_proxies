@@ -21,7 +21,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.6"
+__version__ = "1.0.5"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -996,16 +996,7 @@ class GoodProxySpeedPlugin(BasePlugin):
                 return _notify("error", f"Тест скорости не завершён: {str(error)[:180]}")
 
             speed_mbps, speed_text = _format_speed_mbps(total_bytes, elapsed)
-            # Ручная проверка 06.11 (SP1): функции нужен record с ключом "item",
-            # а раньше передавался сам ctx (ключ "proxy_item") — item всегда был
-            # None и скорость НИКОГДА не попадала в имя прокси
-            speed_record = {
-                "item": ctx.get("proxy_item"),
-                "display_host": ctx.get("host", ""),
-                "host": ctx.get("host", ""),
-                "port": ctx.get("port", 0),
-            }
-            name_updated = self._set_native_proxy_speed_name(speed_record, speed_text)
+            name_updated = self._set_native_proxy_speed_name(ctx, speed_text)
             if name_updated:
                 self._save_native_proxy_speed_names()
                 self._refresh_proxy_name_ui()
