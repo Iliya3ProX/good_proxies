@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import string
 import sys
 import threading
 import time
@@ -22,7 +23,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -525,36 +526,40 @@ class GoodProxySpeedPlugin(BasePlugin):
                 size_idx = 2
             base_size = sizes[size_idx]
 
-            # Ровные круглые размеры и нулевое содержимое иногда не проходят
-            # upload (фильтры режут однобайтовый паттерн) — генерируем случайные
-            # байты и «плавающий» размер: база ± до 512 КБ, но не меньше 1 МБ
+            # Нулевой паттерн и ровные размеры иногда не проходят upload —
+            # генерируем обычный .txt со случайными буквами и «плавающим»
+            # размером (база ± до 512 КБ, не меньше 1 МБ), без подписи
             target_size = base_size + random.randint(-512 * 1024, 512 * 1024)
             target_size = max(1024 * 1024, target_size)
+            letters = (string.ascii_letters + string.digits).encode("ascii")
 
             ApplicationLoader = jclass("org.telegram.messenger.ApplicationLoader")
             cache_dir = ApplicationLoader.applicationContext.getCacheDir().getAbsolutePath()
-            file_path = os.path.join(cache_dir, "speed_test_asset.bin")
+            file_path = os.path.join(cache_dir, "speed_test_asset.txt")
+            # старый файл чистим перед созданием нового, но НЕ сразу после
+            # отправки: upload асинхронный и читает файл с диска после вызова
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
 
             chunk_size = 64 * 1024
             with open(file_path, "wb") as f:
                 written = 0
                 while written < target_size:
                     to_write = min(chunk_size, target_size - written)
-                    f.write(os.urandom(to_write))
+                    buf = bytearray(os.urandom(to_write))
+                    for i in range(to_write):
+                        buf[i] = letters[buf[i] % len(letters)]
+                    f.write(bytes(buf))
                     written += to_write
 
             actual_mb = os.path.getsize(file_path) / (1024.0 * 1024.0)
             label = f"{actual_mb:.1f} МБ"
 
             peer_id = get_user_config().getClientUserId()
-            caption = f"Good Proxy — тестовый файл ({label})"
-            send_document(peer_id, file_path, caption=caption)
-
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception:
-                pass
+            send_document(peer_id, file_path)
 
             self.set_setting("speed_test_message_id", "")
             time.sleep(1.2)
