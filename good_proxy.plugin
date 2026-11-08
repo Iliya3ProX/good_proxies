@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.4.5"
+__version__ = "2.4.6"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __category__ = ["tools"]
@@ -961,6 +961,160 @@ def _remove_keys_from_java_list(proxy_list, keys):
             errors.append(f"entry {index}: {type(e).__name__}")
     remaining = _proxy_list_keys(proxy_list) & keys
     return removed, remaining, errors
+
+
+_PROXY_LIST_CAP = 40  # эмпирическая капа клиентского списка прокси: при 40
+# записей ProxyController.addProxy молча игнорирует добавление (наблюдение
+# 07.11: 6+34=40, следующие 5 вызовов прошли без исключений, список не менялся)
+
+
+def _proxy_item_available(item):
+    """True/False/None — флаг available из ProxyInfo (нативная проверка клиента)."""
+    for accessor in ("isAvailable", "getAvailable"):
+        try:
+            method = getattr(item, accessor, None)
+            if callable(method):
+                value = method()
+                if value is not None:
+                    return bool(value)
+        except Exception:
+            pass
+    try:
+        value = getattr(item, "available", None)
+        if value is None:
+            value = get_private_field(item, "available")
+        if value is not None:
+            return bool(value)
+    except Exception:
+        pass
+    return None
+
+
+def _secret_variants(secret):
+    """Варианты секрета для сверки: регистр и ee-префикс (FakeTLS)."""
+    text = str(secret or "").strip()
+    lowered = text.lower()
+    variants = {text, lowered}
+    if len(lowered) > 32 and lowered.startswith("ee"):
+        variants.add(lowered[2:])
+    return variants
+
+
+def _find_proxy_variant(proxy_list, host, port, secret):
+    """Есть ли в списке запись с тем же host:port и эквивалентным секретом.
+
+    Спасает от ложных негативов дедупа: клиент может хранить секрет в другой
+    нормализации (регистр / ee-префикс), и наш ключ не совпадает с ключом
+    записи, хотя ProxyController/SharedConfig считает настройки равными.
+    """
+    count = _proxy_list_size(proxy_list)
+    if count is None:
+        return False
+    host_norm = str(host or "").strip().lower()
+    try:
+        port_norm = int(port)
+    except Exception:
+        return False
+    wanted = _secret_variants(secret)
+    for index in range(count):
+        item = _proxy_list_item(proxy_list, index)
+        if item is None:
+            continue
+        try:
+            item_host, item_port, item_secret, _proxy_type = _proxy_item_values(item)
+            if str(item_host or "").strip().lower() != host_norm:
+                continue
+            if int(item_port or 0) != port_norm:
+                continue
+            if _secret_variants(item_secret) & wanted:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _evict_unavailable_proxies(shared_config, proxy_controller, proxy_list, need, keep_keys):
+    """Освободить место в списке прокси: удалить до need записей, которые
+    нативная проверка клиента пометила unavailable. Активный прокси и записи
+    из keep_keys не трогаются. Возвращает (сколько освободили, ошибка|None)."""
+    if proxy_list is None or need <= 0:
+        return 0, None
+    count = _proxy_list_size(proxy_list)
+    if count is None:
+        return 0, "не удалось прочитать список прокси"
+    candidates = []
+    for index in range(count):
+        item = _proxy_list_item(proxy_list, index)
+        if item is None:
+            continue
+        try:
+            host, port, secret, _proxy_type = _proxy_item_values(item)
+            if not host or not port:
+                continue
+            key = _proxy_key(host, port, secret)
+            if key in keep_keys:
+                continue
+            if _proxy_item_available(item) is False:
+                candidates.append((index, item, key, f"{host}:{port}"))
+        except Exception:
+            continue
+    if not candidates:
+        return 0, None
+
+    candidates.reverse()  # с конца — индексы не съезжают при удалении
+    remove_candidates = []
+    if proxy_controller is not None:
+        try:
+            remove_candidates, _signatures = _proxy_remove_candidates(proxy_controller)
+        except Exception:
+            remove_candidates = []
+    evicted = 0
+    evicted_keys = set()
+    errors = []
+    for index, item, key, label in candidates:
+        if evicted >= need:
+            break
+        removed = False
+        if remove_candidates:
+            try:
+                removed, _method, _call_errors = _invoke_proxy_remove(
+                    proxy_controller, shared_config, item, index, key, remove_candidates
+                )
+            except Exception as e:
+                errors.append(f"{label}: {type(e).__name__}")
+                removed = False
+        if not removed:
+            # официальный статический путь (SharedConfig.deleteProxy)
+            try:
+                delete = getattr(shared_config, "deleteProxy", None)
+                if callable(delete):
+                    delete(item)
+                    refreshed = _get_proxy_list(shared_config, proxy_controller)
+                    refreshed = refreshed if refreshed is not None else proxy_list
+                    removed = key not in _proxy_list_keys(refreshed)
+            except Exception as e:
+                errors.append(f"{label}: {type(e).__name__}: {str(e)[:80]}")
+        if removed:
+            evicted += 1
+            evicted_keys.add(key)
+        else:
+            errors.append(f"{label}: запись осталась в списке")
+
+    if evicted_keys:
+        try:
+            save = getattr(proxy_controller, "saveProxyList", None) if proxy_controller is not None else None
+            if callable(save):
+                save()
+        except Exception:
+            pass
+        try:
+            shared_list = _get_shared_config_proxy_list(shared_config)
+            _remove_keys_from_java_list(shared_list, evicted_keys)
+        except Exception:
+            pass
+
+    error_text = "; ".join(errors[:3]) if errors and evicted < need else None
+    return evicted, error_text
 
 
 def _make_proxy_info(proxy_info_class, proxy):
@@ -2592,6 +2746,58 @@ class ProxyManagerPlugin(BasePlugin):
                     if synced_list is not None:
                         proxy_list = synced_list
                 existing = _proxy_list_keys(proxy_list)
+
+                # Капа списка: при 40 записях ProxyController.addProxy молча
+                # игнорирует новые. Бюджет мест считаем ТОЛЬКО при наличии
+                # контроллера — официальный SharedConfig.addProxy капы не
+                # имеет. При нехватке мест освобождаем их: удаляем записи,
+                # помеченные нативной проверкой как unavailable.
+                list_size_before = _proxy_list_size(proxy_list)
+                free_slots = None
+                evicted_count = 0
+                evict_error = None
+                if proxy_controller is not None and list_size_before is not None:
+                    free_slots = max(0, _PROXY_LIST_CAP - int(list_size_before))
+                    pending_new = len({
+                        _proxy_key(
+                            proxy.get("host"), proxy.get("port"),
+                            proxy.get("secret", ""), proxy.get("type", "mtproto"),
+                        )
+                        for proxy in parsed
+                        if _proxy_key(
+                            proxy.get("host"), proxy.get("port"),
+                            proxy.get("secret", ""), proxy.get("type", "mtproto"),
+                        ) not in existing
+                    })
+                    shortfall = pending_new - free_slots
+                    if shortfall > 0:
+                        # выселять можно всё, кроме активного прокси клиента
+                        current_keep = set()
+                        try:
+                            cur = None
+                            cur_getter = getattr(proxy_controller, "getCurrentProxy", None)
+                            if callable(cur_getter):
+                                cur = cur_getter()
+                            if cur is None:
+                                cur = getattr(SC, "currentProxy", None)
+                            if cur is not None:
+                                cur_host, cur_port, cur_secret, _cur_type = _proxy_item_values(cur)
+                                if cur_host and cur_port:
+                                    current_keep.add(_proxy_key(cur_host, cur_port, cur_secret))
+                        except Exception:
+                            pass
+                        evicted_count, evict_error = _evict_unavailable_proxies(
+                            SC, proxy_controller, proxy_list, shortfall, current_keep
+                        )
+                        if evicted_count:
+                            refreshed = _get_proxy_list(SC, proxy_controller)
+                            if refreshed is not None:
+                                proxy_list = refreshed
+                            existing = _proxy_list_keys(proxy_list)
+                            new_size = _proxy_list_size(proxy_list)
+                            free_slots = max(0, _PROXY_LIST_CAP - int(new_size)) if new_size is not None else 0
+                        if evict_error:
+                            _log(f"evict unavailable proxies: {evict_error}")
             except Exception as e:
                 _log(f"Cannot read Telegram proxy list: {e}")
                 return _report_error(
@@ -2608,6 +2814,7 @@ class ProxyManagerPlugin(BasePlugin):
 
             added = failed = 0
             already_present = 0
+            skipped_full = 0
             first_add_error = ""
             add_api_used = False
             controller_api_used = False
@@ -2622,6 +2829,9 @@ class ProxyManagerPlugin(BasePlugin):
                 if key in existing:
                     already_present += 1
                     continue
+                if free_slots is not None and free_slots <= 0:
+                    skipped_full += 1
+                    continue
                 try:
                     info = _make_proxy_info(ProxyInfo, proxy)
                 except Exception as e:
@@ -2635,6 +2845,7 @@ class ProxyManagerPlugin(BasePlugin):
                 add_error = None
                 add_call_succeeded = False
                 controller_add_called = False
+                add_result = None
                 try:
                     add_proxy = None
                     if proxy_controller is not None:
@@ -2645,7 +2856,7 @@ class ProxyManagerPlugin(BasePlugin):
                         add_proxy = getattr(SC, "addProxy", None)
                     if not callable(add_proxy):
                         raise AttributeError("ProxyController.addProxy/SharedConfig.addProxy отсутствует")
-                    add_proxy(info)
+                    add_result = add_proxy(info)
                     add_call_succeeded = True
                 except Exception as e:
                     add_error = e
@@ -2682,6 +2893,8 @@ class ProxyManagerPlugin(BasePlugin):
                 if inserted:
                     added += 1
                     existing.add(key)
+                    if free_slots is not None:
+                        free_slots -= 1
                     if inserted_via_api:
                         add_api_used = True
                         if controller_add_called:
@@ -2689,9 +2902,21 @@ class ProxyManagerPlugin(BasePlugin):
                     else:
                         direct_list_add_used = True
                 else:
+                    # Дедуп по настройкам у клиента мог сработать при ключе,
+                    # который не совпал с нашим (нормализация секрета):
+                    # элемент фактически уже в клиенте — это не ошибка.
+                    if _find_proxy_variant(proxy_list, proxy.get("host"), proxy.get("port"), proxy.get("secret", "")):
+                        already_present += 1
+                        existing.add(key)
+                        continue
                     failed += 1
                     if not first_add_error:
-                        reason = add_error or RuntimeError("элемент не появился в SharedConfig.proxyList")
+                        if add_result is not None and add_error is None:
+                            reason = RuntimeError("клиент уже содержит равные настройки прокси (дедуп addProxy)")
+                        elif proxy_controller is not None and _proxy_list_size(proxy_list) == _PROXY_LIST_CAP:
+                            reason = RuntimeError(f"список прокси клиента полон ({_PROXY_LIST_CAP}/{_PROXY_LIST_CAP})")
+                        else:
+                            reason = add_error or RuntimeError("элемент не появился в списке прокси клиента")
                         first_add_error = f"{type(reason).__name__}: {reason}"
 
             try:
@@ -2727,6 +2952,13 @@ class ProxyManagerPlugin(BasePlugin):
             )
             if already_present:
                 summary += f" Уже было в клиенте: {already_present}."
+            if evicted_count:
+                summary += f" Освобождено нерабочих: {evicted_count}."
+            if skipped_full:
+                summary += (
+                    f" Не влезло в полный список ({_PROXY_LIST_CAP}): {skipped_full}"
+                    " — освободите место кнопкой «Проверить и удалить нерабочие»."
+                )
             if failed:
                 summary += f" Не удалось добавить из источника: {failed}."
                 if first_add_error:
