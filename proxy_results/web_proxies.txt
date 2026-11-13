@@ -1,2 +1,0 @@
-tg://webproxy?server=zarnia.xyz&secret=ddfd367c42b90b0d8ec99796e343454424
-tg://webproxy?server=animals.independence.surf&secret=dd8c8e46d0f8330d5a19aff107c088bc36
