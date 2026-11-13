@@ -1,3 +1,2 @@
-tg://webproxy?server=boberlox.site&secret=dd9a04242727dfa0a4a7c77e7813929c01
+tg://webproxy?server=zarnia.xyz&secret=ddfd367c42b90b0d8ec99796e343454424
 tg://webproxy?server=animals.independence.surf&secret=dd8c8e46d0f8330d5a19aff107c088bc36
-tg://webproxy?server=c9d8n.librava.click&secret=dd5aa53c09879423668987d232864cb2ab
