@@ -1,27 +1,27 @@
 {
- "generated_at": "2026-11-13 20:10",
+ "generated_at": "2026-11-14 02:52",
  "check_interval_hours": 6,
  "pool": {
-  "total": 2973,
-  "alive": 5,
-  "dead": 2968
+  "total": 2898,
+  "alive": 1830,
+  "dead": 1068
  },
  "tiers": {
-  "tier1": 0,
-  "tier2": 5,
+  "tier1": 63,
+  "tier2": 1767,
   "tier3": 0,
-  "slow": 2
+  "slow": 1538
  },
  "nodes": {
-  "pinned": 0,
-  "with_dead_nodes": 0,
-  "total": 0,
-  "alive": 0
+  "pinned": 481,
+  "with_dead_nodes": 101,
+  "total": 916,
+  "alive": 802
  },
  "ping": {
-  "best": 13,
-  "p50": 129,
-  "avg": 1897
+  "best": 14,
+  "p50": 4125,
+  "avg": 3886
  },
  "speed": {
   "tested": 0,
@@ -31,14 +31,29 @@
  },
  "countries": [
   {
+   "flag": "🇺🇸",
+   "cc": "US",
+   "count": 1789
+  },
+  {
+   "flag": "🇵🇱",
+   "cc": "PL",
+   "count": 25
+  },
+  {
    "flag": "🇷🇺",
    "cc": "RU",
    "count": 3
   },
   {
+   "flag": "🇬🇧",
+   "cc": "GB",
+   "count": 2
+  },
+  {
    "flag": "🇩🇪",
    "cc": "DE",
-   "count": 2
+   "count": 1
   }
  ],
  "web_alive": 0
