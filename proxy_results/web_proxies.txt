@@ -1,2 +1,11 @@
+tg://webproxy?server=vale86.oops.wtf&secret=9fc8d7d1aeee614bd5fa3b760da44dd3&via=websocket
+tg://webproxy?server=analytics.hienshi.space/ihirlis3rqf7hjr2&secret=cKwmZgoWjD9Z1yYzBukNw_8
+tg://webproxy?server=web.gqsp.eu.org&secret=42321843839901889701749610949474&via=websocket-lanes
+tg://webproxy?server=nov.webvirt.cloud&secret=2cb152167b45c9a010c8109fef2d8fd6&via=websocket
+tg://webproxy?server=quietlinen.top&secret=dd66760fbe828d233c69fdd9d700e7d830
+tg://webproxy?server=deepsky.club&secret=1549de91e71978183354fa780ac7d53f&via=https
 tg://webproxy?server=cacaoware.com&secret=caca0caca0caca0caca0caca0caca000&via=https
+tg://webproxy?server=quietlinen.top&secret=1eaec1ce3369e15561eeee78e20fb897
 tg://webproxy?server=boberlox.site&secret=dd9a04242727dfa0a4a7c77e7813929c01
+tg://webproxy?server=zarnia.xyz&secret=ddfd367c42b90b0d8ec99796e343454424
+tg://webproxy?server=animals.independence.surf&secret=dd8c8e46d0f8330d5a19aff107c088bc36
