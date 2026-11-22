@@ -21,7 +21,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.4.6"
+__version__ = "2.5.0"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __category__ = ["tools"]
@@ -34,6 +34,20 @@ PROXIES_URLS = [
     "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/proxies.txt",
     "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
     "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/proxies.txt",
+]
+
+VLESS_URLS = [
+    "https://ghproxy.net/https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/vless_keys.txt",
+    "https://raw.githubusercontent.com/Iliya3ProX/good_proxies/main/vless_keys.txt",
+    "https://fastly.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/vless_keys.txt",
+    "https://cdn.jsdelivr.net/gh/Iliya3ProX/good_proxies@main/vless_keys.txt",
+]
+
+VLESS_FALLBACK_URLS = [
+    "https://storage.yandexcloud.net/v1ess-adress/vless%20adress.txt",
+    "https://cdn.jsdelivr.net/gh/aviamastersgh/vpn-free-russia@main/verified_configs.txt",
+    "https://cdn.jsdelivr.net/gh/igareck/vpn-configs-for-russia@main/BLACK_VLESS_RUS_mobile.txt",
+    "https://cdn.jsdelivr.net/gh/igareck/vpn-configs-for-russia@main/WHITE-CIDR-RU-checked.txt",
 ]
 
 # Компактная статистика пула, генерируется чекером в proxy_results/analytics.json
@@ -61,8 +75,24 @@ SPEED_PLUGIN_URLS = [
 # SHA-256 эталонной версии speed-плагина (обновляется синхронно с этим плагином).
 # Если версия файла совпала с эталонной, а хеш нет — подмена, установка блокируется.
 # Новая версия без эталонного хеша ставится с предупреждением.
-SPEED_PLUGIN_PIN_VERSION = "1.0.6"
-SPEED_PLUGIN_SHA256 = "79aa1694404d0974c02f36c656eda552202a7928f0a1f1d9ebb92a80f96ee272"
+SPEED_PLUGIN_PIN_VERSION = "1.2.1"
+SPEED_PLUGIN_SHA256 = "fdabc2f3d7ff5043e0b786cbed430dc6bd57cd3797345067358ec2820bec2536"
+
+
+def _extract_vless_keys(text):
+    """Извлекает и дедуплицирует vless:// ключи по host:port:uuid."""
+    seen = set()
+    keys = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("vless://"):
+            continue
+        m = re.match(r"^vless://([^@]+)@([^:/?#]+):(\d+)", line)
+        dedup_key = f"{m.group(2).lower()}:{m.group(3)}:{m.group(1).lower()}" if m else line.split("#", 1)[0]
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            keys.append(line)
+    return keys
 
 
 def _copy_to_clipboard(text, label="GoodProxy_Proxies"):
@@ -1417,13 +1447,15 @@ class ProxyManagerPlugin(BasePlugin):
                                 elif diff == 2:
                                     plugin._fetch_proxies(tier_filter="web")
                                 elif diff == 3:
-                                    plugin._export_proxies()
+                                    plugin._import_vless_keys()
                                 elif diff == 4:
-                                    plugin._on_cleanup_nonworking_click()
+                                    plugin._export_proxies()
                                 elif diff == 5:
+                                    plugin._on_cleanup_nonworking_click()
+                                elif diff == 6:
                                     plugin._on_analytics_click()
-                                elif diff >= 6:
-                                    # ряды 6+ — good_proxy_speed.plugin,
+                                elif diff >= 7:
+                                    # ряды 7+ — good_proxy_speed.plugin,
                                     # отдаём клик дальше по цепочке врапперов
                                     return old_l.onItemClick(view, pos) if old_l else None
 
@@ -1437,7 +1469,7 @@ class ProxyManagerPlugin(BasePlugin):
                     self.hook_method(m, ClickHook())
 
             # Хуки на адаптер (кнопки внизу списка)
-            # Ряды 0..5 — наши (0 — разделитель, 1..5 — кнопки), 6..8 — ряды
+            # Ряды 0..6 — наши (0 — разделитель, 1..6 — кнопки), 7..9 — ряды
             # good_proxy_speed.plugin. Координация порядконезависима: каждый
             # хук трогает только свой диапазон, CountHook'и идемпотентны.
             AdapterCls = _resolve_class("org.telegram.ui.ProxyListActivity$ListAdapter")
@@ -1452,15 +1484,15 @@ class ProxyManagerPlugin(BasePlugin):
                         if orig is None:
                             return
                         current = int(param.getResult())
-                        if current > orig + 6:
+                        if current > orig + 7:
                             return  # speed-плагин уже добавил свои ряды (+3)
-                        param.setResult(Integer(orig + 6))
+                        param.setResult(Integer(orig + 7))
 
                 class ViewTypeHook(MethodHook):
                     def before_hooked_method(self, param):
                         if (orig := _get_orig_count(param)) is not None:
                             diff = int(param.args[0]) - orig
-                            if 0 <= diff < 6:
+                            if 0 <= diff < 7:
                                 param.setResult(Integer(0 if diff == 0 else 1))
 
                 class EnabledHook(MethodHook):
@@ -1499,12 +1531,15 @@ class ProxyManagerPlugin(BasePlugin):
                                 cell.setText("Получить Web Proxy", True)
                                 _apply_icon(cell, "textView", "msg_link")
                             elif cpos == 3:
+                                cell.setText("Получить VLESS-ключи (в буфер)", True)
+                                _apply_icon(cell, "textView", "msg_copy")
+                            elif cpos == 4:
                                 cell.setText("Экспортировать прокси", False)
                                 _apply_icon(cell, "textView", "msg_share")
-                            elif cpos == 4:
+                            elif cpos == 5:
                                 cell.setText("Проверить и удалить нерабочие", False)
                                 _apply_icon(cell, "textView", "msg_delete")
-                            elif cpos == 5:
+                            elif cpos == 6:
                                 cell.setText("Аналитика сервера", False)
                                 _apply_icon(cell, "textView", "statistic")
                         except Exception:
@@ -1588,6 +1623,12 @@ class ProxyManagerPlugin(BasePlugin):
                 subtext="Импортировать проверенные WebSocket и HTTPS прокси.",
                 icon="msg_link",
                 on_click=lambda _v: self._fetch_proxies(tier_filter="web"),
+            ))
+            rows.append(Text(
+                text="Получить VLESS-ключи",
+                subtext="Загрузить VLESS-ключи и скопировать их в буфер обмена.",
+                icon="msg_copy",
+                on_click=self._import_vless_keys,
             ))
             try:
                 rows.append(Selector(
@@ -2542,6 +2583,12 @@ class ProxyManagerPlugin(BasePlugin):
         return True
 
     def _get_active_urls(self):
+        return self._filter_urls_by_ghproxy(PROXIES_URLS)
+
+    def _get_active_vless_urls(self):
+        return self._filter_urls_by_ghproxy(VLESS_URLS)
+
+    def _filter_urls_by_ghproxy(self, urls):
         try:
             value = self.get_setting("use_ghproxy", True)
             if isinstance(value, str):
@@ -2551,8 +2598,8 @@ class ProxyManagerPlugin(BasePlugin):
         except Exception:
             use_ghproxy = True
         if use_ghproxy:
-            return list(PROXIES_URLS)
-        return [url for url in PROXIES_URLS if "ghproxy.net" not in url.lower()]
+            return list(urls)
+        return [url for url in urls if "ghproxy.net" not in url.lower()]
 
     def _prompt_import_tier(self):
         """Показывает диалог выбора Tier перед импортом или использует фиксированную настройку."""
@@ -3030,6 +3077,63 @@ class ProxyManagerPlugin(BasePlugin):
         except Exception as e:
             _log(f"analytics fatal error: {type(e).__name__}: {e}")
             return _report_error(f"Сбой аналитики: {type(e).__name__}: {str(e)[:160]}")
+
+    def _import_vless_keys(self, _view=None):
+        _notify("info", "Загружаем VLESS-ключи…")
+        run_on_queue(self._do_import_vless, PLUGINS_QUEUE)
+
+    def _do_import_vless(self):
+        try:
+            keys = []
+            source_label = ""
+            source_errors = []
+
+            def _fetch_vless_text(url):
+                host = urlparse(url).hostname or url
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={"User-Agent": f"GoodProxy/{__version__} (Android)"},
+                    )
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        if int(resp.getcode() or 0) != 200:
+                            source_errors.append(f"{host}: HTTP {resp.getcode()}")
+                            return ""
+                        return resp.read(2 * 1024 * 1024).decode("utf-8", "ignore")
+                except Exception as e:
+                    source_errors.append(f"{host}: {type(e).__name__}: {str(e)[:60]}")
+                    return ""
+
+            for url in self._get_active_vless_urls():
+                body = _fetch_vless_text(url)
+                if not body:
+                    continue
+                extracted = _extract_vless_keys(body)
+                if extracted:
+                    keys = extracted
+                    source_label = "Good Proxy"
+                    break
+                host = urlparse(url).hostname or url
+                source_errors.append(f"{host}: список пуст")
+
+            if not keys:
+                fallback_chunks = [txt for url in VLESS_FALLBACK_URLS if (txt := _fetch_vless_text(url))]
+                if fallback_chunks:
+                    keys = _extract_vless_keys("\n".join(fallback_chunks))
+                    if keys:
+                        source_label = "резервные источники"
+
+            if not keys:
+                details = "\n".join(source_errors[:4]) or "Источники не вернули VLESS-ключей."
+                return _report_error("Не удалось загрузить VLESS-ключи.\n" + details)
+
+            txt = "\n".join(keys)
+            if not _copy_to_clipboard(txt, label="GoodProxy_VLESS"):
+                return _report_error("Не удалось скопировать VLESS-ключи в буфер обмена.")
+            _notify("success", f"Скопировано {len(keys)} VLESS-ключей ({source_label}) в буфер обмена!")
+        except Exception as e:
+            _log(f"vless import error: {e}")
+            _report_error(f"Ошибка импорта VLESS: {e}")
 
     def _export_proxies(self):
         run_on_queue(self._do_export, PLUGINS_QUEUE)
