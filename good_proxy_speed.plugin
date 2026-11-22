@@ -23,7 +23,7 @@ __id__ = "good_proxy_speed"
 __name__ = "Good Proxy Speed"
 __description__ = "Замер реальной скорости скачивания Telegram-прокси (одиночный и пакетный тест с TCP Window Warmup)."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __icon__ = "msg2_speed"
@@ -355,8 +355,8 @@ class GoodProxySpeedPlugin(BasePlugin):
                 _log(f"add MAIN_MENU error: {e}")
 
             # Кнопки теста рядами списка ProxyListActivity, после блока
-            # good_proxy.plugin: diff 6 — разделитель, 7 — замер скорости,
-            # 8 — генерация тестового файла. Хуки порядконезависимы с хуками
+            # good_proxy.plugin: diff 7 — разделитель, 8 — замер скорости,
+            # 9 — генерация тестового файла. Хуки порядконезависимы с хуками
             # good_proxy.plugin (каждый трогает только свой диапазон, оба
             # CountHook'а идемпотентны). Клик-враппер делегирует чужие ряды
             # по цепочке, поэтому порядок загрузки плагинов не важен.
@@ -374,35 +374,35 @@ class GoodProxySpeedPlugin(BasePlugin):
                             if orig is None:
                                 return
                             current = int(param.getResult())
-                            # блок good_proxy.plugin (+6) резервируем всегда,
+                            # блок good_proxy.plugin (+7) резервируем всегда,
                             # даже если его хук ещё не отработал
-                            param.setResult(Integer(max(current, orig + 6) + 3))
+                            param.setResult(Integer(max(current, orig + 7) + 3))
 
                     class SpeedViewTypeHook(MethodHook):
                         def before_hooked_method(self, param):
                             if (orig := _speed_orig_count(param)) is not None:
                                 diff = int(param.args[0]) - orig
-                                if diff >= 6:
-                                    param.setResult(Integer(0 if diff == 6 else 1))
+                                if diff >= 7:
+                                    param.setResult(Integer(0 if diff == 7 else 1))
 
                     class SpeedBindHook(MethodHook):
                         def before_hooked_method(self, param):
                             if (orig := _speed_orig_count(param)) is not None:
-                                if int(param.args[1]) - orig >= 6:
+                                if int(param.args[1]) - orig >= 7:
                                     param.setResult(None)
 
                         def after_hooked_method(self, param):
                             if (orig := _speed_orig_count(param)) is None:
                                 return
                             cpos = int(param.args[1]) - orig
-                            if cpos < 7:
+                            if cpos < 8:
                                 return
                             cell = param.args[0].itemView
                             try:
-                                if cpos == 7:
+                                if cpos == 8:
                                     cell.setText("Замер скорости активного прокси", True)
                                     _apply_icon(cell, "textView", "msg2_speed")
-                                elif cpos == 8:
+                                elif cpos == 9:
                                     cell.setText("Сгенерировать тестовый файл", True)
                                     _apply_icon(cell, "textView", "msg_download")
                             except Exception as e:
@@ -411,13 +411,13 @@ class GoodProxySpeedPlugin(BasePlugin):
                     class SpeedEnabledHook(MethodHook):
                         def before_hooked_method(self, param):
                             if (orig := _speed_orig_count(param)) is not None:
-                                if int(param.args[0].getAdapterPosition()) - orig >= 6:
+                                if int(param.args[0].getAdapterPosition()) - orig >= 7:
                                     param.setResult(_jbox_bool(True))
 
                     class SpeedIdHook(MethodHook):
                         def before_hooked_method(self, param):
                             if (orig := _speed_orig_count(param)) is not None:
-                                if (diff := int(param.args[0]) - orig) >= 6:
+                                if (diff := int(param.args[0]) - orig) >= 7:
                                     param.setResult(_jbox_long(-200 - diff))
 
                     class SpeedClickHook(MethodHook):
@@ -436,12 +436,12 @@ class GoodProxySpeedPlugin(BasePlugin):
                                     def onItemClick(self, view, pos):
                                         orig = int(get_private_field(act, "rowCount") or 0)
                                         diff = pos - orig
-                                        if diff < 6:
-                                            # ряды 0..orig+5 — активность и good_proxy.plugin
+                                        if diff < 7:
+                                            # ряды 0..orig+6 — активность и good_proxy.plugin
                                             return old_l.onItemClick(view, pos) if old_l else None
-                                        if diff == 7:
+                                        if diff == 8:
                                             plugin._on_check_current_proxy_speed(None)
-                                        elif diff == 8:
+                                        elif diff == 9:
                                             plugin._on_generate_speed_file_click(None)
 
                                 lv.setOnItemClickListener(SpeedPMClickListener())
