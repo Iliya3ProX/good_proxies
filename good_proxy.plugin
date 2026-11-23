@@ -22,7 +22,7 @@ __id__ = "good_proxy"
 __name__ = "Good Proxy"
 __description__ = "Сборщик рабочих прокси из открытых источников."
 __author__ = "@MouXoziain & Gemini"
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.4.3"
 __category__ = ["tools"]
@@ -76,8 +76,8 @@ SPEED_PLUGIN_URLS = [
 # SHA-256 эталонной версии speed-плагина (обновляется синхронно с этим плагином).
 # Если версия файла совпала с эталонной, а хеш нет — подмена, установка блокируется.
 # Новая версия без эталонного хеша ставится с предупреждением.
-SPEED_PLUGIN_PIN_VERSION = "1.2.1"
-SPEED_PLUGIN_SHA256 = "0f9eabc0e5f2f09c3787c9a27523930af18da536ce58467185276c763daca12e"
+SPEED_PLUGIN_PIN_VERSION = "1.2.2"
+SPEED_PLUGIN_SHA256 = "34d141428f4193a18484aded2545795d29cf7ac2d798725b135c7880aa787c64"
 
 
 def _extract_vless_keys(text):
