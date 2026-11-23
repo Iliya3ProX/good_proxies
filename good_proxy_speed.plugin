@@ -104,12 +104,6 @@ def _atomic_write_bytes(target_file, data):
 def _unwrap_class(cls_obj):
     if cls_obj is None:
         return None
-    if isinstance(cls_obj, type):
-        for attr in ("__java_class__", "class_"):
-            jc = getattr(cls_obj, attr, None)
-            if jc is not None:
-                return jc
-        return cls_obj
     if hasattr(cls_obj, "getName"):
         try:
             if str(cls_obj.getName()) != "java.lang.Class":
@@ -123,6 +117,11 @@ def _unwrap_class(cls_obj):
                 return jc
         except Exception:
             pass
+    if isinstance(cls_obj, type):
+        for attr in ("__java_class__", "class_"):
+            jc = getattr(cls_obj, attr, None)
+            if jc is not None:
+                return jc
     return cls_obj
 
 

@@ -77,7 +77,7 @@ SPEED_PLUGIN_URLS = [
 # Если версия файла совпала с эталонной, а хеш нет — подмена, установка блокируется.
 # Новая версия без эталонного хеша ставится с предупреждением.
 SPEED_PLUGIN_PIN_VERSION = "1.2.1"
-SPEED_PLUGIN_SHA256 = "405e68adcedb32f60afb708d44a73f6989c2e382411d0c9178ef9140719546d9"
+SPEED_PLUGIN_SHA256 = "0f9eabc0e5f2f09c3787c9a27523930af18da536ce58467185276c763daca12e"
 
 
 def _extract_vless_keys(text):
@@ -1389,12 +1389,6 @@ def _jbox_long(v):
 def _unwrap_class(cls_obj):
     if cls_obj is None:
         return None
-    if isinstance(cls_obj, type):
-        for attr in ("__java_class__", "class_"):
-            jc = getattr(cls_obj, attr, None)
-            if jc is not None:
-                return jc
-        return cls_obj
     if hasattr(cls_obj, "getName"):
         try:
             if str(cls_obj.getName()) != "java.lang.Class":
@@ -1408,6 +1402,11 @@ def _unwrap_class(cls_obj):
                 return jc
         except Exception:
             pass
+    if isinstance(cls_obj, type):
+        for attr in ("__java_class__", "class_"):
+            jc = getattr(cls_obj, attr, None)
+            if jc is not None:
+                return jc
     return cls_obj
 
 
