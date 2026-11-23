@@ -1,21 +1,22 @@
+import hashlib
 import html as html_lib
 import ipaddress
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.request
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from android_utils import OnClickListener, log, run_on_ui_thread
-from base_plugin import BasePlugin, MenuItemData, MenuItemType, MethodHook
-from client_utils import PLUGINS_QUEUE, get_last_fragment, get_user_config, run_on_queue, send_message
-from hook_utils import find_class, get_private_field, set_private_field
+from base_plugin import BasePlugin, MethodHook
+from client_utils import PLUGINS_QUEUE, get_last_fragment, run_on_queue
+from hook_utils import find_class, get_private_field
 from ui.bulletin import BulletinHelper
 from java import dynamic_proxy, jclass
-from java.lang import Boolean as JBoolean, Integer
-from org.telegram.tgnet import TLRPC
+from java.lang import Boolean as JBoolean, Integer, Long as JLong
 
 __id__ = "good_proxy"
 __name__ = "Good Proxy"
@@ -76,7 +77,7 @@ SPEED_PLUGIN_URLS = [
 # Если версия файла совпала с эталонной, а хеш нет — подмена, установка блокируется.
 # Новая версия без эталонного хеша ставится с предупреждением.
 SPEED_PLUGIN_PIN_VERSION = "1.2.1"
-SPEED_PLUGIN_SHA256 = "fdabc2f3d7ff5043e0b786cbed430dc6bd57cd3797345067358ec2820bec2536"
+SPEED_PLUGIN_SHA256 = "405e68adcedb32f60afb708d44a73f6989c2e382411d0c9178ef9140719546d9"
 
 
 def _extract_vless_keys(text):
@@ -96,25 +97,52 @@ def _extract_vless_keys(text):
 
 
 def _copy_to_clipboard(text, label="GoodProxy_Proxies"):
-    """Копирует текст в буфер обмена Android (через AndroidUtilities или ClipboardManager)."""
-    try:
-        from org.telegram.messenger import AndroidUtilities
-        AndroidUtilities.addToClipboard(text)
-        return True
-    except Exception as e:
-        _log(f"AndroidUtilities.addToClipboard error: {e}")
-    try:
-        from org.telegram.messenger import ApplicationLoader
-        from android.content import ClipData, Context
-        context = ApplicationLoader.applicationContext
-        if context:
-            clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
-            clip = ClipData.newPlainText(label, text)
-            clipboard.setPrimaryClip(clip)
+    """Копирует текст в буфер обмена Android строго на UI-потоке."""
+    def _do_copy():
+        try:
+            from org.telegram.messenger import AndroidUtilities
+            AndroidUtilities.addToClipboard(text)
             return True
+        except Exception as e:
+            _log(f"AndroidUtilities.addToClipboard error: {e}")
+        try:
+            from org.telegram.messenger import ApplicationLoader
+            from android.content import ClipData, Context
+            context = ApplicationLoader.applicationContext
+            if context:
+                clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                clip = ClipData.newPlainText(label, text)
+                clipboard.setPrimaryClip(clip)
+                return True
+        except Exception as e:
+            _log(f"ClipboardManager fallback error: {e}")
+        return False
+
+    try:
+        Looper = jclass("android.os.Looper")
+        if Looper.myLooper() == Looper.getMainLooper():
+            return _do_copy()
+    except Exception:
+        pass
+
+    done = threading.Event()
+    result = [False]
+
+    def _run_on_ui():
+        try:
+            result[0] = _do_copy()
+        finally:
+            done.set()
+
+    try:
+        run_on_ui_thread(_run_on_ui)
+        if done.wait(timeout=3.0):
+            return result[0]
+        _log("_copy_to_clipboard UI dispatch timed out")
+        return False
     except Exception as e:
-        _log(f"ClipboardManager fallback error: {e}")
-    return False
+        _log(f"_copy_to_clipboard dispatch error: {e}")
+        return _do_copy()
 
 
 def _parse_semver(v_str):
@@ -124,6 +152,64 @@ def _parse_semver(v_str):
         if part.isdigit():
             parts.append(int(part))
     return tuple(parts) or (0, 0, 0)
+
+
+def _mirror_source_group(url):
+    """Maps mirror URL to an independent source group (cdn/fastly jsDelivr share one group)."""
+    host = (urlparse(str(url or "")).hostname or str(url or "")).strip().lower()
+    if host in ("cdn.jsdelivr.net", "fastly.jsdelivr.net") or host.endswith(".jsdelivr.net"):
+        return "jsdelivr"
+    if host == "raw.githubusercontent.com":
+        return "github_raw"
+    if host == "ghproxy.net":
+        return "ghproxy"
+    return host
+
+
+def _select_consensus_version(probes, min_groups=2):
+    """Select the highest semver supported by at least min_groups independent mirror groups."""
+    groups_by_ver = {}
+    for item in probes or ():
+        ver, url = item[0], item[1]
+        if not ver:
+            continue
+        groups_by_ver.setdefault(ver, set()).add(_mirror_source_group(url))
+    eligible = [ver for ver, groups in groups_by_ver.items() if len(groups) >= int(min_groups)]
+    if not eligible:
+        return None
+    return max(eligible, key=_parse_semver)
+
+
+def _select_consensus_payload(downloads, min_groups=2):
+    """Group downloaded payloads by SHA-256 and require >= min_groups independent mirror groups."""
+    groups = {}
+    for base_url, host, data in downloads or ():
+        digest = hashlib.sha256(data).hexdigest()
+        entry = groups.setdefault(digest, {"bytes": data, "hosts": [], "groups": set(), "digest": digest})
+        entry["hosts"].append(host)
+        entry["groups"].add(_mirror_source_group(base_url))
+    if not groups:
+        return None, False
+    consensus = max(groups.values(), key=lambda g: (len(g["groups"]), len(g["hosts"])))
+    verified = len(consensus["groups"]) >= int(min_groups)
+    return consensus, verified
+
+
+def _atomic_write_bytes(target_file, data):
+    tmp_path = f"{target_file}.tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target_file)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
 
 
 
@@ -297,9 +383,9 @@ _SAVED_OUTPUT_URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
 
 def _proxy_key(host, port, secret="", proxy_type="mtproto", via=""):
     """Canonical key used for de-duplication across URL/source variants."""
-    p_type = str(proxy_type or "mtproto").lower()
+    p_type = str(proxy_type or "mtproto").strip().lower()
     if p_type == "web" or int(port or 0) == 0:
-        return f"web:{str(host or '').strip().lower()}:{int(port or 443)}:{str(secret or '').strip()}:{str(via or '').strip().lower()}"
+        return f"web:{str(host or '').strip().lower()}:{int(port or 443)}:{str(secret or '').strip()}"
     return f"mtproto:{str(host or '').strip().lower()}:{int(port)}:{str(secret or '').strip()}"
 
 
@@ -485,7 +571,7 @@ def _parse_proxy(line):
 
             clean_frag = re.sub(r"^tier\s*[123]\s*\|?", "", frag_raw, flags=re.IGNORECASE).replace("?", "").strip()
             if clean_frag:
-                speed = clean_frag.replace("MBs", " МБ/с").replace("Mbs", " МБ/с").strip()
+                speed = re.sub(r"mbs", " МБ/с", clean_frag, flags=re.IGNORECASE).strip()
         else:
             sec_lower = secret.lower()
             if is_web or (sec_lower.startswith("ee") and len(sec_lower) > 34):
@@ -532,17 +618,27 @@ def _parse_proxy_text(raw):
                 secret = str(entry.get("secret", "") or "").strip()
                 via = entry.get("via")
                 if via:
+                    try:
+                        port = int(entry.get("port") or 443)
+                    except (TypeError, ValueError):
+                        continue
+                    if not (1 <= port <= 65535):
+                        continue
                     parsed.append({
                         "host": server,
-                        "port": 443,
+                        "port": port,
                         "secret": secret,
                         "speed": "",
+                        "speed_val": 0.0,
                         "tier": 1,
                         "type": "web",
-                        "via": str(via),
+                        "via": str(via).strip().lower(),
                     })
                 else:
-                    port = int(entry.get("port") or 0)
+                    try:
+                        port = int(entry.get("port") or 0)
+                    except (TypeError, ValueError):
+                        continue
                     if 1 <= port <= 65535:
                         sec_lower = secret.lower()
                         tier = 1 if (sec_lower.startswith("ee") and len(sec_lower) > 34) else (2 if sec_lower.startswith("dd") else 3)
@@ -551,8 +647,10 @@ def _parse_proxy_text(raw):
                             "port": port,
                             "secret": secret,
                             "speed": "",
+                            "speed_val": 0.0,
                             "tier": tier,
                             "type": "mtproto",
+                            "via": "",
                         })
             if parsed:
                 return parsed
@@ -740,9 +838,9 @@ def _proxy_list_keys(proxy_list):
         if item is None:
             continue
         try:
-            host, port, secret, _proxy_type = _proxy_item_values(item)
-            if host and port:
-                keys.add(_proxy_key(host, port, secret))
+            host, port, secret, proxy_type = _proxy_item_values(item)
+            if host and (port or str(proxy_type or "").lower() == "web"):
+                keys.add(_proxy_key(host, port, secret, proxy_type))
         except Exception:
             continue
     return keys
@@ -794,9 +892,9 @@ def _sync_shared_list_into_controller(shared_config, proxy_controller):
             continue
         try:
             host, port, secret, proxy_type = _proxy_item_values(item)
-            if not host or not port:
+            if not host or not (port or str(proxy_type or "").lower() == "web"):
                 continue
-            key = _proxy_key(host, port, secret)
+            key = _proxy_key(host, port, secret, proxy_type)
             if key not in missing_keys:
                 continue
 
@@ -871,10 +969,10 @@ def _merge_proxy_lists(*proxy_lists):
             if item is None:
                 continue
             try:
-                host, port, secret, _proxy_type = _proxy_item_values(item)
-                if not host or not port:
+                host, port, secret, proxy_type = _proxy_item_values(item)
+                if not host or not (port or str(proxy_type or "").lower() == "web"):
                     continue
-                key = _proxy_key(host, port, secret)
+                key = _proxy_key(host, port, secret, proxy_type)
                 if key in keys:
                     continue
                 keys.add(key)
@@ -930,8 +1028,8 @@ def _proxy_index_for_key(proxy_list, wanted_key):
         if item is None:
             continue
         try:
-            host, port, secret, _proxy_type = _proxy_item_values(item)
-            if host and port and _proxy_key(host, port, secret) == wanted_key:
+            host, port, secret, proxy_type = _proxy_item_values(item)
+            if host and (port or str(proxy_type or "").lower() == "web") and _proxy_key(host, port, secret, proxy_type) == wanted_key:
                 return index
         except Exception:
             continue
@@ -972,8 +1070,8 @@ def _remove_keys_from_java_list(proxy_list, keys):
         if item is None:
             continue
         try:
-            host, port, secret, _proxy_type = _proxy_item_values(item)
-            key = _proxy_key(host, port, secret) if host and port else None
+            host, port, secret, proxy_type = _proxy_item_values(item)
+            key = _proxy_key(host, port, secret, proxy_type) if (host and (port or str(proxy_type or "").lower() == "web")) else None
             if key not in keys:
                 continue
             remove = getattr(proxy_list, "remove", None)
@@ -1078,10 +1176,10 @@ def _evict_unavailable_proxies(shared_config, proxy_controller, proxy_list, need
         if item is None:
             continue
         try:
-            host, port, secret, _proxy_type = _proxy_item_values(item)
-            if not host or not port:
+            host, port, secret, proxy_type = _proxy_item_values(item)
+            if not host or not (port or str(proxy_type or "").lower() == "web"):
                 continue
-            key = _proxy_key(host, port, secret)
+            key = _proxy_key(host, port, secret, proxy_type)
             if key in keep_keys:
                 continue
             if _proxy_item_available(item) is False:
@@ -1160,9 +1258,16 @@ def _make_proxy_info(proxy_info_class, proxy):
         ProxySettings = jclass("org.telegram.utils.proxy.ProxySettings")
         Uri = jclass("android.net.Uri")
         if proxy_type == "web":
-            uri_str = f"tg://webproxy?server={host}&secret={secret}"
+            q = [("server", host)]
+            if port and port != 443:
+                q.append(("port", str(port)))
+            q.append(("secret", secret))
+            via = str(proxy.get("via", "") or "").strip()
+            if via:
+                q.append(("via", via))
+            uri_str = f"tg://webproxy?{urlencode(q)}"
         else:
-            uri_str = f"tg://proxy?server={host}&port={port}&secret={secret}"
+            uri_str = f"tg://proxy?{urlencode([('server', host), ('port', str(port)), ('secret', secret)])}"
         ps = ProxySettings.fromUri(Uri.parse(uri_str))
         if ps is not None:
             return proxy_info_class(ps)
@@ -1268,28 +1373,28 @@ def _apply_icon(cell, tv_name, icon_name):
 def _jbox_bool(v):
     """Боксинг Python bool в java.lang.Boolean (для setResult методов с boolean)."""
     try:
-        return Boolean(True if v else False)
-    except NameError:
-        try:
-            return jclass("java.lang.Boolean").valueOf(True if v else False)
-        except Exception:
-            return True if v else False
+        return JBoolean.valueOf(bool(v))
+    except Exception:
+        return bool(v)
 
 
 def _jbox_long(v):
     """Боксинг Python int в java.lang.Long (для setResult методов с long)."""
     try:
-        return Long(int(v))
-    except NameError:
-        try:
-            return jclass("java.lang.Long").valueOf(int(v))
-        except Exception:
-            return int(v)
+        return JLong.valueOf(int(v))
+    except Exception:
+        return int(v)
 
 
 def _unwrap_class(cls_obj):
     if cls_obj is None:
         return None
+    if isinstance(cls_obj, type):
+        for attr in ("__java_class__", "class_"):
+            jc = getattr(cls_obj, attr, None)
+            if jc is not None:
+                return jc
+        return cls_obj
     if hasattr(cls_obj, "getName"):
         try:
             if str(cls_obj.getName()) != "java.lang.Class":
@@ -1319,10 +1424,13 @@ def _resolve_class(name):
             pass
     if cls is None:
         try:
-            cls = jclass(name)
+            cls = _unwrap_class(jclass(name))
         except Exception:
             pass
     return _unwrap_class(cls)
+
+
+_MAIN_CLICK_TAG_KEY = 0x5A475001
 
 
 def _proxy_api_diagnostics():
@@ -1384,6 +1492,11 @@ def _proxy_api_diagnostics():
 class ProxyManagerPlugin(BasePlugin):
     def on_plugin_load(self):
         try:
+            self._unloaded = False
+            self._unload_event = threading.Event()
+            self._hooks = []
+            self._update_timer = None
+            self._wrapped_list_views = set()
             self._cleanup_busy = False
             self._onboarding_dialog_open = False
             plugin = self
@@ -1399,9 +1512,28 @@ class ProxyManagerPlugin(BasePlugin):
                 _log("ProxyListActivity not found")
                 return
 
+            def _lv_already_wrapped(lv):
+                marker = id(plugin)
+                try:
+                    if lv.getTag(_MAIN_CLICK_TAG_KEY) == marker:
+                        return True
+                except Exception:
+                    pass
+                return id(lv) in plugin._wrapped_list_views
+
+            def _mark_lv_wrapped(lv):
+                marker = id(plugin)
+                try:
+                    lv.setTag(_MAIN_CLICK_TAG_KEY, marker)
+                except Exception:
+                    pass
+                plugin._wrapped_list_views.add(id(lv))
+
             # Кнопка обновления в верхнем меню (ActionBar)
             class ActionBarHook(MethodHook):
                 def after_hooked_method(self, param):
+                    if getattr(plugin, "_unloaded", False):
+                        return
                     act = param.thisObject
                     try:
                         ab = get_private_field(act, "actionBar")
@@ -1415,29 +1547,33 @@ class ProxyManagerPlugin(BasePlugin):
                                 res_id = ctx.getResources().getIdentifier("msg_download", "drawable", ctx.getPackageName())
                                 iw = jclass("org.telegram.messenger.AndroidUtilities").dp(40)
                                 it = menu.addItemWithWidth(MENU_IMPORT_ID, res_id, iw, "Обновить Good Proxy")
-                                it.setOnClickListener(OnClickListener(lambda _v: plugin._fetch_proxies()))
+                                it.setOnClickListener(OnClickListener(
+                                    lambda _v: None if getattr(plugin, "_unloaded", False) else plugin._fetch_proxies()
+                                ))
                     except Exception as e:
                         _log(f"actionBar add error: {e}")
 
             # Хук клика на элементы списка (кнопки внизу)
             class ClickHook(MethodHook):
                 def after_hooked_method(self, param):
+                    if getattr(plugin, "_unloaded", False):
+                        return
                     act = param.thisObject
                     try:
                         lv = get_private_field(act, "listView")
+                        if lv is None:
+                            return
+                        if _lv_already_wrapped(lv):
+                            return
                         old_l = get_private_field(lv, "onItemClickListener")
-                        if old_l is not None:
-                            lname = str(old_l.getClass().getName())
-                            # свой враппер уже стоит (SpeedPMClickListener —
-                            # чужой, его оборачиваем)
-                            if "PMClickListener" in lname and "SpeedPMClickListener" not in lname:
-                                return
 
                         class PMClickListener(dynamic_proxy(jclass("org.telegram.ui.Components.RecyclerListView$OnItemClickListener"))):
                             def __init__(self):
                                 super().__init__()
 
                             def onItemClick(self, view, pos):
+                                if getattr(plugin, "_unloaded", False):
+                                    return old_l.onItemClick(view, pos) if old_l else None
                                 orig = int(get_private_field(act, "rowCount") or 0)
                                 if pos < orig:
                                     return old_l.onItemClick(view, pos) if old_l else None
@@ -1460,13 +1596,19 @@ class ProxyManagerPlugin(BasePlugin):
                                     return old_l.onItemClick(view, pos) if old_l else None
 
                         lv.setOnItemClickListener(PMClickListener())
-                    except Exception:
-                        pass
+                        _mark_lv_wrapped(lv)
+                    except Exception as e:
+                        _log(f"click hook error: {e}")
+
+            def _register_hook(method, hook):
+                handle = self.hook_method(method, hook)
+                if handle is not None:
+                    self._hooks.append(handle)
 
             for m in ActivityCls.getDeclaredMethods():
                 if m.getName() == "createView":
-                    self.hook_method(m, ActionBarHook())
-                    self.hook_method(m, ClickHook())
+                    _register_hook(m, ActionBarHook())
+                    _register_hook(m, ClickHook())
 
             # Хуки на адаптер (кнопки внизу списка)
             # Ряды 0..6 — наши (0 — разделитель, 1..6 — кнопки), 7..9 — ряды
@@ -1480,6 +1622,8 @@ class ProxyManagerPlugin(BasePlugin):
 
                 class CountHook(MethodHook):
                     def after_hooked_method(self, param):
+                        if getattr(plugin, "_unloaded", False):
+                            return
                         orig = _get_orig_count(param)
                         if orig is None:
                             return
@@ -1490,6 +1634,8 @@ class ProxyManagerPlugin(BasePlugin):
 
                 class ViewTypeHook(MethodHook):
                     def before_hooked_method(self, param):
+                        if getattr(plugin, "_unloaded", False):
+                            return
                         if (orig := _get_orig_count(param)) is not None:
                             diff = int(param.args[0]) - orig
                             if 0 <= diff < 7:
@@ -1501,8 +1647,13 @@ class ProxyManagerPlugin(BasePlugin):
                     # onChildAttachedToWindow делает child.setEnabled(false)
                     # и клики по нашим рядам не доходят до листенера.
                     def before_hooked_method(self, param):
+                        if getattr(plugin, "_unloaded", False):
+                            return
+                        holder = param.args[0]
+                        if holder is None:
+                            return
                         if (orig := _get_orig_count(param)) is not None:
-                            if int(param.args[0].getAdapterPosition()) >= orig:
+                            if int(holder.getAdapterPosition()) >= orig:
                                 param.setResult(_jbox_bool(True))
 
                 class IdHook(MethodHook):
@@ -1510,19 +1661,28 @@ class ProxyManagerPlugin(BasePlugin):
                     # доп. рядов → коллизия stable ID («Two different
                     # ViewHolders have the same stable ID»).
                     def before_hooked_method(self, param):
+                        if getattr(plugin, "_unloaded", False):
+                            return
                         if (orig := _get_orig_count(param)) is not None:
                             if (diff := int(param.args[0]) - orig) >= 0:
                                 param.setResult(_jbox_long(-100 - diff))
 
                 class BindHook(MethodHook):
                     def before_hooked_method(self, param):
+                        if getattr(plugin, "_unloaded", False):
+                            return
                         if (orig := _get_orig_count(param)) is not None and int(param.args[1]) >= orig:
                             param.setResult(None)
 
                     def after_hooked_method(self, param):
+                        if getattr(plugin, "_unloaded", False):
+                            return
                         if (orig := _get_orig_count(param)) is None or (pos := int(param.args[1])) < orig:
                             return
-                        cell, cpos = param.args[0].itemView, pos - orig
+                        holder = param.args[0]
+                        if holder is None:
+                            return
+                        cell, cpos = holder.itemView, pos - orig
                         try:
                             if cpos == 1:
                                 cell.setText("Получить новый список (MTProto)", True)
@@ -1542,29 +1702,63 @@ class ProxyManagerPlugin(BasePlugin):
                             elif cpos == 6:
                                 cell.setText("Аналитика сервера", False)
                                 _apply_icon(cell, "textView", "statistic")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _log(f"bind row error: {e}")
 
                 for m in AdapterCls.getDeclaredMethods():
                     if m.getName() == "getItemCount":
-                        self.hook_method(m, CountHook())
+                        _register_hook(m, CountHook())
                     elif m.getName() == "getItemViewType":
-                        self.hook_method(m, ViewTypeHook())
+                        _register_hook(m, ViewTypeHook())
                     elif m.getName() == "onBindViewHolder" and len(m.getParameterTypes()) == 2:
-                        self.hook_method(m, BindHook())
+                        _register_hook(m, BindHook())
                     elif m.getName() == "isEnabled" and len(m.getParameterTypes()) == 1:
-                        self.hook_method(m, EnabledHook())
+                        _register_hook(m, EnabledHook())
                     elif m.getName() == "getItemId" and len(m.getParameterTypes()) == 1:
-                        self.hook_method(m, IdHook())
+                        _register_hook(m, IdHook())
+                setattr(sys, "_good_proxy_active_rows", 7)
 
             _log(f"Plugin v{__version__} loaded successfully")
             try:
-                threading.Timer(6.0, lambda: self._check_plugin_update(manual=False)).start()
+                timer = threading.Timer(
+                    6.0,
+                    lambda: (None if getattr(self, "_unloaded", False) else self._check_plugin_update(manual=False)),
+                )
+                timer.daemon = True
+                self._update_timer = timer
+                timer.start()
             except Exception as e:
                 _log(f"auto-update timer error: {e}")
         except Exception as e:
             _log(f"on_plugin_load error: {e}")
             _notify("error", f"Не удалось полностью запустить Good Proxy: {type(e).__name__}.\n{str(e)[:350]}")
+
+    def on_plugin_unload(self):
+        self._unloaded = True
+        setattr(sys, "_good_proxy_active_rows", 0)
+        ev = getattr(self, "_unload_event", None)
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+        timer = getattr(self, "_update_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            self._update_timer = None
+        for handle in list(getattr(self, "_hooks", ())):
+            try:
+                self.unhook_method(handle)
+            except Exception:
+                pass
+        if hasattr(self, "_hooks"):
+            self._hooks.clear()
+        if hasattr(self, "_wrapped_list_views"):
+            self._wrapped_list_views.clear()
+        _log("Plugin unloaded")
 
     def _install_proxy_sponsor_hider(self):
         """Блокировка поиска и запроса спонсорских каналов прокси."""
@@ -1581,7 +1775,9 @@ class ProxyManagerPlugin(BasePlugin):
             for m in MessagesControllerCls.getDeclaredMethods():
                 if m.getName() == "checkPromoInfo":
                     try:
-                        self.hook_method(m, hook)
+                        handle = self.hook_method(m, hook)
+                        if handle is not None:
+                            self._hooks.append(handle)
                     except Exception as e:
                         _log(f"hook checkPromoInfo error: {e}")
         except Exception as e:
@@ -1741,10 +1937,11 @@ class ProxyManagerPlugin(BasePlugin):
         run_on_queue(self._do_download_speed_plugin, PLUGINS_QUEUE)
 
     def _do_download_speed_plugin(self):
-        remote_bytes = None
-        remote_version = None
+        candidates = []  # (version, base_url, host, data)
         errors = []
-        for base_url in SPEED_PLUGIN_URLS:
+        for base_url in self._filter_urls_by_ghproxy(SPEED_PLUGIN_URLS):
+            if getattr(self, "_unloaded", False):
+                return
             host = urlparse(base_url).hostname or base_url
             sep = "&" if "?" in base_url else "?"
             url = f"{base_url}{sep}t={int(time.time())}"
@@ -1764,9 +1961,8 @@ class ProxyManagerPlugin(BasePlugin):
                         header_sample = data[:3000].decode("utf-8", errors="ignore")
                         if "good_proxy_speed" in header_sample:
                             m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
-                            remote_version = m.group(1).strip() if m else "1.0.0"
-                            remote_bytes = data
-                            break
+                            cand_version = m.group(1).strip() if m else "1.0.0"
+                            candidates.append((cand_version, base_url, host, data))
                         else:
                             errors.append(f"{host}: файл повреждён или не распознан")
                     else:
@@ -1777,30 +1973,53 @@ class ProxyManagerPlugin(BasePlugin):
                 _log(f"Download speed plugin from {url} failed: {e}")
                 continue
 
-        if not remote_bytes:
+        if not candidates:
             details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
             return _notify("error", f"Не удалось скачать плагин Good Proxy Speed:\n{details}")
 
-        # Проверка целостности против эталонного хеша (см. SPEED_PLUGIN_SHA256)
-        try:
-            import hashlib as _hashlib
-            digest = _hashlib.sha256(remote_bytes).hexdigest()
-            if SPEED_PLUGIN_SHA256 and digest != SPEED_PLUGIN_SHA256:
-                if remote_version == SPEED_PLUGIN_PIN_VERSION:
+        remote_bytes = None
+        remote_version = None
+
+        # 1. Если >= 2 независимых группы зеркал согласны на более новую версию с одинаковым SHA-256
+        consensus_ver = _select_consensus_version([(v, u, h) for v, u, h, _ in candidates], min_groups=2)
+        if consensus_ver and _parse_semver(consensus_ver) > _parse_semver(SPEED_PLUGIN_PIN_VERSION):
+            matching = [(u, h, d) for v, u, h, d in candidates if v == consensus_ver]
+            consensus, verified = _select_consensus_payload(matching, min_groups=2)
+            if consensus and verified:
+                remote_bytes = consensus["bytes"]
+                remote_version = consensus_ver
+
+        # 2. Если эталонная версия — строго требуем совпадения с SPEED_PLUGIN_SHA256
+        if remote_bytes is None:
+            pinned_candidates = [(v, u, h, d) for v, u, h, d in candidates if v == SPEED_PLUGIN_PIN_VERSION]
+            if pinned_candidates:
+                for cand_ver, _u, _h, data in pinned_candidates:
+                    digest = hashlib.sha256(data).hexdigest()
+                    if SPEED_PLUGIN_SHA256 and digest == SPEED_PLUGIN_SHA256:
+                        remote_bytes = data
+                        remote_version = cand_ver
+                        break
+                if remote_bytes is None:
                     _log(f"Speed plugin integrity check FAILED (pinned v{SPEED_PLUGIN_PIN_VERSION})")
-                    return _notify("error", "Скачанный плагин Good Proxy Speed не прошёл проверку целостности "
-                                            "(SHA-256 не совпал для эталонной версии). Установка отменена.")
-                _notify("warning", f"Версия Good Proxy Speed {remote_version} ещё не зафиксирована эталонным хешем — "
-                                   "устанавливаю без сверки целостности.")
-        except Exception as _e:
-            _log(f"Speed plugin hash check error: {type(_e).__name__}")
+                    return _notify(
+                        "error",
+                        "Скачанный плагин Good Proxy Speed не прошёл проверку целостности "
+                        "(SHA-256 не совпал для эталонной версии). Установка отменена.",
+                    )
+
+        if remote_bytes is None:
+            _log("Speed plugin download rejected: no pinned SHA-256 match and no >=2 independent mirror consensus")
+            return _notify(
+                "error",
+                "Установка Good Proxy Speed отклонена: не удалось подтвердить SHA-256 "
+                "минимум на двух независимых зеркалах.",
+            )
 
         try:
             from file_utils import get_plugins_dir
             pdir = str(get_plugins_dir())
             plugin_file = os.path.join(pdir, "good_proxy_speed.plugin")
-            with open(plugin_file, "wb") as f:
-                f.write(remote_bytes)
+            _atomic_write_bytes(plugin_file, remote_bytes)
             _log(f"Good Proxy Speed v{remote_version} successfully saved to {plugin_file}")
             _notify("success", f"Плагин Good Proxy Speed (v{remote_version}) успешно скачан!\nПерезапустите Telegram для его активации.")
         except Exception as e:
@@ -1813,6 +2032,8 @@ class ProxyManagerPlugin(BasePlugin):
 
     def _check_plugin_update(self, manual=False):
         """Проверяет наличие новой версии плагина на GitHub и обновляет файл."""
+        if getattr(self, "_unloaded", False):
+            return
         if not manual:
             try:
                 enabled = self.get_setting("auto_update_plugin", True)
@@ -1826,11 +2047,15 @@ class ProxyManagerPlugin(BasePlugin):
                 return
 
         def task():
+            if getattr(self, "_unloaded", False):
+                return
             current_ver_tuple = _parse_semver(__version__)
             errors = []
-            # Этап 1: дешёвая проба версий по всем зеркалам (читаем только шапку файла)
+            # Этап 1: дешёвая проба версий по всем активным зеркалам (читаем только шапку файла)
             probes = []  # (version, base_url, host)
-            for base_url in PLUGIN_UPDATE_URLS:
+            for base_url in self._filter_urls_by_ghproxy(PLUGIN_UPDATE_URLS):
+                if getattr(self, "_unloaded", False):
+                    return
                 host = urlparse(base_url).hostname or base_url
                 sep = "&" if "?" in base_url else "?"
                 url = f"{base_url}{sep}t={int(time.time())}"
@@ -1865,23 +2090,27 @@ class ProxyManagerPlugin(BasePlugin):
                     _notify("error", f"Не удалось проверить обновления плагина:\n{details}")
                 return
 
-            try:
-                highest_remote_version = max((v for v, _, _ in probes), key=_parse_semver)
-            except Exception:
-                highest_remote_version = None
-            if not highest_remote_version or _parse_semver(highest_remote_version) <= current_ver_tuple:
+            highest_remote_version = _select_consensus_version(probes, min_groups=2)
+            if not highest_remote_version:
+                any_newer = any(_parse_semver(v) > current_ver_tuple for v, _, _ in probes)
+                if any_newer:
+                    _log("Update rejected: fewer than 2 independent mirror groups agree on version")
+                    if manual:
+                        _notify("error", "Обновление отклонено: новая версия не подтверждена минимум на двух независимых зеркалах.")
+                elif manual:
+                    _notify("info", f"У вас установлена последняя версия Good Proxy (v{__version__}).")
+                return
+            if _parse_semver(highest_remote_version) <= current_ver_tuple:
                 if manual:
                     _notify("info", f"У вас установлена последняя версия Good Proxy (v{__version__}).")
                 return
 
-            # Этап 2: полное скачивание у зеркал с максимальной версией и перекрёстная
-            # сверка SHA-256. Компрометация одного зеркала больше не даёт удалённое
-            # исполнение кода: файл ставится только при консенсусе двух независимых
-            # источников либо когда ответило всего одно зеркало (с предупреждением).
-            import hashlib as _hashlib
-            groups = {}  # digest -> {"bytes": data, "hosts": [host]}
-            responded = 0
+            # Этап 2: полное скачивание у зеркал с консенсусной версией и перекрёстная
+            # сверка SHA-256 минимум по 2 независимым группам зеркал.
+            downloads = []
             for ver, base_url, host in probes:
+                if getattr(self, "_unloaded", False):
+                    return
                 if ver != highest_remote_version:
                     continue
                 sep = "&" if "?" in base_url else "?"
@@ -1900,28 +2129,23 @@ class ProxyManagerPlugin(BasePlugin):
                             errors.append(f"{host}: HTTP {resp.getcode()} (полная загрузка)")
                             continue
                         data = resp.read(4 * 1024 * 1024)
-                    responded += 1
-                    entry = groups.setdefault(_hashlib.sha256(data).hexdigest(), {"bytes": data, "hosts": []})
-                    entry["hosts"].append(host)
+                    downloads.append((base_url, host, data))
                 except Exception as e:
                     errors.append(f"{host}: {type(e).__name__}: {str(e)[:80]} (полная загрузка)")
                     _log(f"Full download mirror {url} failed: {e}")
                     continue
 
-            if not groups:
+            consensus, verified = _select_consensus_payload(downloads, min_groups=2)
+            if not consensus:
                 if manual:
                     details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
                     _notify("error", f"Не удалось скачать обновление плагина:\n{details}")
                 return
 
-            consensus = max(groups.values(), key=lambda g: len(g["hosts"]))
-            verified = len(consensus["hosts"]) >= 2
-            if not verified and len(groups) > 1:
-                # Несколько зеркал ответили, но содержимое разное — установка запрещена
-                _log(f"Update integrity check failed: mirrors disagree ({[g['hosts'] for g in groups.values()]})")
+            if not verified:
+                _log(f"Update integrity check failed: fewer than 2 independent mirror groups verified SHA-256 ({consensus['hosts']})")
                 if manual:
-                    _notify("error", "Обновление отклонено: зеркала вернули разные файлы. "
-                                     "Попробуйте позже или скачайте плагин вручную.")
+                    _notify("error", "Обновление отклонено: не удалось подтвердить SHA-256 минимум на двух независимых зеркалах.")
                 return
 
             target_bytes = consensus["bytes"]
@@ -1935,16 +2159,10 @@ class ProxyManagerPlugin(BasePlugin):
                 if not target_file:
                     from file_utils import get_plugins_dir
                     target_file = os.path.join(str(get_plugins_dir()), "good_proxy.plugin")
-                with open(target_file, "wb") as f:
-                    f.write(target_bytes)
+                _atomic_write_bytes(target_file, target_bytes)
                 _log(f"Plugin successfully updated to v{highest_remote_version} at {target_file} "
-                     f"(verified={verified}, mirrors={consensus['hosts']})")
-                if verified:
-                    _notify("success", f"Плагин Good Proxy обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
-                else:
-                    _notify("warning", f"Плагин Good Proxy обновлен до v{highest_remote_version}.\n"
-                                       "Внимание: файл получен только с одного зеркала, перекрёстная сверка недоступна.\n"
-                                       "Перезапустите Telegram для применения изменений.")
+                     f"(verified={verified}, groups={sorted(consensus['groups'])}, mirrors={consensus['hosts']})")
+                _notify("success", f"Плагин Good Proxy обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
             except Exception as e:
                 _log(f"Failed to write updated plugin file: {e}")
                 if manual:
@@ -2131,9 +2349,9 @@ class ProxyManagerPlugin(BasePlugin):
                     continue
                 try:
                     host, port, secret, proxy_type = _proxy_item_values(item)
-                    if not host or not port:
+                    if not host or not (port or str(proxy_type or "").lower() == "web"):
                         continue
-                    key = _proxy_key(host, port, secret)
+                    key = _proxy_key(host, port, secret, proxy_type)
                     if key in controller_keys:
                         continue
                     controller_keys.add(key)
@@ -2158,9 +2376,9 @@ class ProxyManagerPlugin(BasePlugin):
             current_key = None
             if current_proxy is not None:
                 try:
-                    host, port, secret, _proxy_type = _proxy_item_values(current_proxy)
-                    if host and port:
-                        current_key = _proxy_key(host, port, secret)
+                    host, port, secret, proxy_type = _proxy_item_values(current_proxy)
+                    if host and (port or str(proxy_type or "").lower() == "web"):
+                        current_key = _proxy_key(host, port, secret, proxy_type)
                 except Exception:
                     pass
             proxy_enabled = bool(getattr(SC, "proxyEnabled", False))
@@ -2193,10 +2411,10 @@ class ProxyManagerPlugin(BasePlugin):
                 if item is None:
                     continue
                 try:
-                    host, port, secret, _proxy_type = _proxy_item_values(item)
-                    if not host or not port:
+                    host, port, secret, proxy_type = _proxy_item_values(item)
+                    if not host or not (port or str(proxy_type or "").lower() == "web"):
                         continue
-                    key = _proxy_key(host, port, secret)
+                    key = _proxy_key(host, port, secret, proxy_type)
                     native_records.append((item, key))
                 except Exception:
                     continue
@@ -2288,6 +2506,9 @@ class ProxyManagerPlugin(BasePlugin):
                     status_by_key = {}
 
                     while True:
+                        if getattr(self, "_unloaded", False) or self._unload_event.is_set():
+                            self._cleanup_busy = False
+                            return
                         snapshot_ready = threading.Event()
                         snapshot_box = [None]
 
@@ -2317,7 +2538,9 @@ class ProxyManagerPlugin(BasePlugin):
                             if now - last_progress >= 120.0:
                                 stalled = True
                                 break
-                            time.sleep(0.5)
+                            if self._unload_event.wait(0.5):
+                                self._cleanup_busy = False
+                                return
                             continue
                         status_by_key = snapshot_box[0] or {}
                         done = len(status_by_key)
@@ -2333,7 +2556,9 @@ class ProxyManagerPlugin(BasePlugin):
                         if now - last_progress >= 120.0:
                             stalled = True
                             break
-                        time.sleep(1.0)
+                        if self._unload_event.wait(1.0):
+                            self._cleanup_busy = False
+                            return
 
                     (
                         keys_to_remove,
@@ -2408,7 +2633,10 @@ class ProxyManagerPlugin(BasePlugin):
                     "Прокси без завершённого результата не удаляются; выбранный прокси защищён, если его удалось идентифицировать."
                 )
 
+                confirmed = [False]
+
                 def _confirm(dialog, _which):
+                    confirmed[0] = True
                     dialog.dismiss()
                     run_on_queue(
                         lambda keys=set(keys_to_remove), summary=scan_summary:
@@ -2421,8 +2649,19 @@ class ProxyManagerPlugin(BasePlugin):
                     self._cleanup_busy = False
                     _notify("info", "Очистка отменена; список не изменён.")
 
+                def _on_dismiss(_dialog=None):
+                    if not confirmed[0]:
+                        self._cleanup_busy = False
+
                 builder.set_positive_button("Удалить", _confirm)
                 builder.set_negative_button("Отмена", _cancel)
+                for hook_name in ("set_on_dismiss_listener", "set_on_cancel_listener"):
+                    setter = getattr(builder, hook_name, None)
+                    if callable(setter):
+                        try:
+                            setter(_on_dismiss)
+                        except Exception:
+                            pass
                 builder.show()
             except Exception as e:
                 def _dialog_error(error=e):
@@ -2462,9 +2701,9 @@ class ProxyManagerPlugin(BasePlugin):
             current_key = None
             if current_proxy is not None:
                 try:
-                    host, port, secret, _proxy_type = _proxy_item_values(current_proxy)
-                    if host and port:
-                        current_key = _proxy_key(host, port, secret)
+                    host, port, secret, proxy_type = _proxy_item_values(current_proxy)
+                    if host and (port or str(proxy_type or "").lower() == "web"):
+                        current_key = _proxy_key(host, port, secret, proxy_type)
                 except Exception:
                     pass
             target_keys = set(keys_to_remove)
@@ -2482,8 +2721,8 @@ class ProxyManagerPlugin(BasePlugin):
                 if item is None:
                     continue
                 try:
-                    host, port, secret, _proxy_type = _proxy_item_values(item)
-                    key = _proxy_key(host, port, secret) if host and port else None
+                    host, port, secret, proxy_type = _proxy_item_values(item)
+                    key = _proxy_key(host, port, secret, proxy_type) if (host and (port or str(proxy_type or "").lower() == "web")) else None
                     if key in target_keys:
                         records.append((index, item, host, port, key))
                 except Exception:
@@ -2510,9 +2749,8 @@ class ProxyManagerPlugin(BasePlugin):
             if removed_keys:
                 try:
                     save = getattr(proxy_controller, "saveProxyList", None)
-                    if not callable(save):
-                        raise AttributeError("ProxyController.saveProxyList недоступен")
-                    save()
+                    if callable(save):
+                        save()
                 except Exception as e:
                     controller_save_error = f"ProxyController.saveProxyList: {type(e).__name__}: {str(e)[:120]}"
 
@@ -2716,6 +2954,10 @@ class ProxyManagerPlugin(BasePlugin):
                     if status != 200:
                         source_errors.append(f"{host}: HTTP {status}")
                         continue
+                    if len(body) > 2 * 1024 * 1024:
+                        source_errors.append(f"{host}: ответ превышает лимит 2 МБ")
+                        _log(f"Response too large from {url}; bytes>{2 * 1024 * 1024}")
+                        continue
                     current = _parse_proxy_text(body)
                     if not current:
                         source_errors.append(f"{host}: ответ получен, но прокси-ссылки не распознаны")
@@ -2828,9 +3070,9 @@ class ProxyManagerPlugin(BasePlugin):
                             if cur is None:
                                 cur = getattr(SC, "currentProxy", None)
                             if cur is not None:
-                                cur_host, cur_port, cur_secret, _cur_type = _proxy_item_values(cur)
-                                if cur_host and cur_port:
-                                    current_keep.add(_proxy_key(cur_host, cur_port, cur_secret))
+                                cur_host, cur_port, cur_secret, cur_type = _proxy_item_values(cur)
+                                if cur_host and (cur_port or str(cur_type or "").lower() == "web"):
+                                    current_keep.add(_proxy_key(cur_host, cur_port, cur_secret, cur_type))
                         except Exception:
                             pass
                         evicted_count, evict_error = _evict_unavailable_proxies(
@@ -3049,7 +3291,7 @@ class ProxyManagerPlugin(BasePlugin):
         try:
             data = None
             source_errors = []
-            for url in ANALYTICS_URLS:
+            for url in self._filter_urls_by_ghproxy(ANALYTICS_URLS):
                 host = urlparse(url).hostname or url
                 try:
                     req = urllib.request.Request(
@@ -3158,8 +3400,24 @@ class ProxyManagerPlugin(BasePlugin):
                     continue
                 kind_str = str(kind or "").upper()
                 if kind_str == "WEB" or int(port or 0) == 0:
-                    port_str = f"&port={port}" if (port and int(port) not in (0, 443)) else ""
-                    web.append(f"tg://webproxy?server={host}{port_str}&secret={secret}")
+                    via_val = ""
+                    try:
+                        settings = get_private_field(p, "settings") or getattr(p, "settings", None)
+                        target = settings if settings is not None else p
+                        via_getter = getattr(target, "getVia", None)
+                        raw_via = via_getter() if callable(via_getter) else (
+                            get_private_field(target, "via") or getattr(target, "via", "")
+                        )
+                        via_val = str(raw_via or "").strip()
+                    except Exception:
+                        via_val = ""
+                    q = [("server", host)]
+                    if port and int(port) not in (0, 443):
+                        q.append(("port", str(int(port))))
+                    q.append(("secret", secret))
+                    if via_val:
+                        q.append(("via", via_val))
+                    web.append(f"tg://webproxy?{urlencode(q)}")
                 else:
                     e = {
                         "addr": host,
@@ -3199,7 +3457,8 @@ class ProxyManagerPlugin(BasePlugin):
                 return _report_error("Не удалось сформировать список прокси.")
 
             txt = "\n\n".join(sections)
-            _copy_to_clipboard(txt, label="GoodProxy_Export")
+            if not _copy_to_clipboard(txt, label="GoodProxy_Export"):
+                return _report_error("Не удалось скопировать прокси в буфер обмена.")
             total = len(faketls) + len(padding) + len(web)
             _notify("success", f"Экспортировано {total} прокси! Скопировано в буфер обмена.")
         except Exception as e:

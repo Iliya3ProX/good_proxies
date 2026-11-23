@@ -1,3 +1,4 @@
+import hashlib
 import os
 import random
 import re
@@ -8,14 +9,12 @@ import time
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 
-from android.content import Intent
-from android.net import Uri
 from android_utils import log as _android_log, run_on_ui_thread
 from base_plugin import BasePlugin, MenuItemData, MenuItemType, MethodHook
 from client_utils import PLUGINS_QUEUE, get_last_fragment, get_user_config, run_on_queue, send_document
 from hook_utils import find_class, get_private_field, set_private_field
 from java import dynamic_proxy, jclass
-from java.lang import Boolean as JBoolean, Integer
+from java.lang import Boolean as JBoolean, Integer, Long as JLong
 from org.telegram.tgnet import TLRPC
 from ui.bulletin import BulletinHelper
 
@@ -45,6 +44,113 @@ def _parse_semver(v_str):
     return tuple(parts) or (0, 0, 0)
 
 
+def _mirror_source_group(url):
+    host = (urlparse(str(url or "")).hostname or str(url or "")).strip().lower()
+    if host in ("cdn.jsdelivr.net", "fastly.jsdelivr.net") or host.endswith(".jsdelivr.net"):
+        return "jsdelivr"
+    if host == "raw.githubusercontent.com":
+        return "github_raw"
+    if host == "ghproxy.net":
+        return "ghproxy"
+    return host
+
+
+def _select_consensus_version(probes, min_groups=2):
+    """Select the highest semver supported by at least min_groups independent mirror groups."""
+    groups_by_ver = {}
+    for item in probes or ():
+        ver, url = item[0], item[1]
+        if not ver:
+            continue
+        groups_by_ver.setdefault(ver, set()).add(_mirror_source_group(url))
+    eligible = [ver for ver, groups in groups_by_ver.items() if len(groups) >= int(min_groups)]
+    if not eligible:
+        return None
+    return max(eligible, key=_parse_semver)
+
+
+def _select_consensus_payload(downloads, min_groups=2):
+    """Group downloaded payloads by SHA-256 and require >= min_groups independent mirror groups."""
+    groups = {}
+    for base_url, host, data in downloads or ():
+        digest = hashlib.sha256(data).hexdigest()
+        entry = groups.setdefault(digest, {"bytes": data, "hosts": [], "groups": set(), "digest": digest})
+        entry["hosts"].append(host)
+        entry["groups"].add(_mirror_source_group(base_url))
+    if not groups:
+        return None, False
+    consensus = max(groups.values(), key=lambda g: (len(g["groups"]), len(g["hosts"])))
+    verified = len(consensus["groups"]) >= int(min_groups)
+    return consensus, verified
+
+
+def _atomic_write_bytes(target_file, data):
+    tmp_path = f"{target_file}.tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target_file)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _unwrap_class(cls_obj):
+    if cls_obj is None:
+        return None
+    if isinstance(cls_obj, type):
+        for attr in ("__java_class__", "class_"):
+            jc = getattr(cls_obj, attr, None)
+            if jc is not None:
+                return jc
+        return cls_obj
+    if hasattr(cls_obj, "getName"):
+        try:
+            if str(cls_obj.getName()) != "java.lang.Class":
+                return cls_obj
+        except Exception:
+            pass
+    if hasattr(cls_obj, "getClass"):
+        try:
+            jc = cls_obj.getClass()
+            if hasattr(jc, "getName") and str(jc.getName()) != "java.lang.Class":
+                return jc
+        except Exception:
+            pass
+    return cls_obj
+
+
+def _resolve_class(name):
+    cls = None
+    try:
+        cls = find_class(name)
+    except Exception:
+        pass
+    if cls is None:
+        try:
+            cls = jclass("java.lang.Class").forName(name)
+        except Exception:
+            pass
+    if cls is None:
+        try:
+            cls = _unwrap_class(jclass(name))
+        except Exception:
+            pass
+    return _unwrap_class(cls)
+
+
+def _speed_rows_base_offset(orig_count, current_count, main_rows=0):
+    """Return row offset where speed rows start: orig+7 if good_proxy is active, else orig."""
+    orig = int(orig_count or 0)
+    cur = int(current_count or 0)
+    return orig + 7 if (cur >= orig + 7 or int(main_rows or 0) >= 7) else orig
+
 
 def _log(msg):
     _android_log(f"[GoodProxySpeed] {msg}")
@@ -59,11 +165,29 @@ def _get_proxy_controller():
         "com.exteragram.messenger.proxy.ProxyController",
         "org.telegram.messenger.ProxyController",
     ):
+        cls = None
         try:
             cls = jclass(name)
+        except Exception:
+            try:
+                cls = _resolve_class(name)
+            except Exception:
+                cls = None
+        if cls is None:
+            continue
+        try:
             inst = getattr(cls, "getInstance", None)
             if callable(inst):
-                return inst()
+                res = inst()
+                if res is not None:
+                    return res
+            get_method = getattr(cls, "getMethod", None)
+            if callable(get_method):
+                m = get_method("getInstance")
+                if m is not None:
+                    res = m.invoke(None)
+                    if res is not None:
+                        return res
         except Exception:
             continue
     return None
@@ -115,12 +239,17 @@ def _proxy_list_item(proxy_list, index):
 
 def _notify(kind, text):
     msg = str(text or "")
-    if kind == "error":
-        BulletinHelper.show_error(msg)
-    elif kind == "success":
-        BulletinHelper.show_success(msg)
-    else:
-        BulletinHelper.show_info(msg)
+    def _show():
+        try:
+            if kind == "error":
+                BulletinHelper.show_error(msg)
+            elif kind == "success":
+                BulletinHelper.show_success(msg)
+            else:
+                BulletinHelper.show_info(msg)
+        except Exception as e:
+            _log(f"_notify error: {e}")
+    run_on_ui_thread(_show)
 
 
 def _show_modal_alert(title, message, button_text="Понятно"):
@@ -313,28 +442,31 @@ def _apply_icon(cell, tv_name, icon_name):
 def _jbox_bool(v):
     """Боксинг Python bool в java.lang.Boolean (для setResult boolean-методов)."""
     try:
-        return Boolean(True if v else False)
-    except NameError:
-        try:
-            return jclass("java.lang.Boolean").valueOf(True if v else False)
-        except Exception:
-            return True if v else False
+        return JBoolean.valueOf(bool(v))
+    except Exception:
+        return bool(v)
 
 
 def _jbox_long(v):
     """Боксинг Python int в java.lang.Long (для setResult long-методов)."""
     try:
-        return Long(int(v))
-    except NameError:
-        try:
-            return jclass("java.lang.Long").valueOf(int(v))
-        except Exception:
-            return int(v)
+        return JLong.valueOf(int(v))
+    except Exception:
+        return int(v)
+
+
+_SPEED_CLICK_TAG_KEY = 0x5A475002
 
 
 class GoodProxySpeedPlugin(BasePlugin):
     def on_plugin_load(self):
         try:
+            self._unloaded = False
+            self._unload_event = threading.Event()
+            self._hooks = []
+            self._update_timer = None
+            self._speed_base_offsets = {}
+            self._wrapped_list_views = set()
             self._speed_context = None
             self._bulk_speed_busy = False
             self._bulk_speed_state = None
@@ -354,55 +486,98 @@ class GoodProxySpeedPlugin(BasePlugin):
             except Exception as e:
                 _log(f"add MAIN_MENU error: {e}")
 
-            # Кнопки теста рядами списка ProxyListActivity, после блока
-            # good_proxy.plugin: diff 7 — разделитель, 8 — замер скорости,
-            # 9 — генерация тестового файла. Хуки порядконезависимы с хуками
-            # good_proxy.plugin (каждый трогает только свой диапазон, оба
-            # CountHook'а идемпотентны). Клик-враппер делегирует чужие ряды
-            # по цепочке, поэтому порядок загрузки плагинов не важен.
+            # Кнопки теста рядами списка ProxyListActivity: при активном
+            # good_proxy.plugin начинаются с orig+7, при автономной работе —
+            # с orig (base_offset вычисляется динамически в SpeedCountHook).
             try:
-                AdapterCls = find_class("org.telegram.ui.ProxyListActivity$ListAdapter")
-                ProxyListActivityCls = find_class("org.telegram.ui.ProxyListActivity")
+                AdapterCls = _resolve_class("org.telegram.ui.ProxyListActivity$ListAdapter")
+                ProxyListActivityCls = _resolve_class("org.telegram.ui.ProxyListActivity")
                 if AdapterCls and ProxyListActivityCls:
                     def _speed_orig_count(param):
                         act = get_private_field(param.thisObject, "this$0")
                         return int(get_private_field(act, "rowCount") or 0) if act else None
 
+                    def _speed_base_for_act(act, orig):
+                        if int(getattr(sys, "_good_proxy_active_rows", 0) or 0) >= 7:
+                            return orig + 7
+                        if act is None:
+                            return orig
+                        rel_offset = plugin._speed_base_offsets.get(id(act), 0)
+                        return orig + rel_offset
+
+                    def _lv_already_wrapped(lv):
+                        marker = id(plugin)
+                        try:
+                            if lv.getTag(_SPEED_CLICK_TAG_KEY) == marker:
+                                return True
+                        except Exception:
+                            pass
+                        return id(lv) in plugin._wrapped_list_views
+
+                    def _mark_lv_wrapped(lv):
+                        marker = id(plugin)
+                        try:
+                            lv.setTag(_SPEED_CLICK_TAG_KEY, marker)
+                        except Exception:
+                            pass
+                        plugin._wrapped_list_views.add(id(lv))
+
                     class SpeedCountHook(MethodHook):
                         def after_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
                             orig = _speed_orig_count(param)
                             if orig is None:
                                 return
                             current = int(param.getResult())
-                            # блок good_proxy.plugin (+7) резервируем всегда,
-                            # даже если его хук ещё не отработал
-                            param.setResult(Integer(max(current, orig + 7) + 3))
+                            main_rows = int(getattr(sys, "_good_proxy_active_rows", 0) or 0)
+                            base = _speed_rows_base_offset(orig, current, main_rows=main_rows)
+                            act = get_private_field(param.thisObject, "this$0")
+                            if act is not None:
+                                plugin._speed_base_offsets[id(act)] = base - orig
+                            param.setResult(Integer(base + 3))
 
                     class SpeedViewTypeHook(MethodHook):
                         def before_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
                             if (orig := _speed_orig_count(param)) is not None:
-                                diff = int(param.args[0]) - orig
-                                if diff >= 7:
-                                    param.setResult(Integer(0 if diff == 7 else 1))
+                                act = get_private_field(param.thisObject, "this$0")
+                                base = _speed_base_for_act(act, orig)
+                                rel = int(param.args[0]) - base
+                                if 0 <= rel < 3:
+                                    param.setResult(Integer(0 if rel == 0 else 1))
 
                     class SpeedBindHook(MethodHook):
                         def before_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
                             if (orig := _speed_orig_count(param)) is not None:
-                                if int(param.args[1]) - orig >= 7:
+                                act = get_private_field(param.thisObject, "this$0")
+                                base = _speed_base_for_act(act, orig)
+                                rel = int(param.args[1]) - base
+                                if 0 <= rel < 3:
                                     param.setResult(None)
 
                         def after_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
                             if (orig := _speed_orig_count(param)) is None:
                                 return
-                            cpos = int(param.args[1]) - orig
-                            if cpos < 8:
+                            act = get_private_field(param.thisObject, "this$0")
+                            base = _speed_base_for_act(act, orig)
+                            rel = int(param.args[1]) - base
+                            if rel not in (1, 2):
                                 return
-                            cell = param.args[0].itemView
+                            holder = param.args[0]
+                            if holder is None:
+                                return
+                            cell = holder.itemView
                             try:
-                                if cpos == 8:
+                                if rel == 1:
                                     cell.setText("Замер скорости активного прокси", True)
                                     _apply_icon(cell, "textView", "msg2_speed")
-                                elif cpos == 9:
+                                elif rel == 2:
                                     cell.setText("Сгенерировать тестовый файл", True)
                                     _apply_icon(cell, "textView", "msg_download")
                             except Exception as e:
@@ -410,62 +585,87 @@ class GoodProxySpeedPlugin(BasePlugin):
 
                     class SpeedEnabledHook(MethodHook):
                         def before_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
+                            holder = param.args[0]
+                            if holder is None:
+                                return
                             if (orig := _speed_orig_count(param)) is not None:
-                                if int(param.args[0].getAdapterPosition()) - orig >= 7:
+                                act = get_private_field(param.thisObject, "this$0")
+                                base = _speed_base_for_act(act, orig)
+                                rel = int(holder.getAdapterPosition()) - base
+                                if 0 <= rel < 3:
                                     param.setResult(_jbox_bool(True))
 
                     class SpeedIdHook(MethodHook):
                         def before_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
                             if (orig := _speed_orig_count(param)) is not None:
-                                if (diff := int(param.args[0]) - orig) >= 7:
-                                    param.setResult(_jbox_long(-200 - diff))
+                                act = get_private_field(param.thisObject, "this$0")
+                                base = _speed_base_for_act(act, orig)
+                                rel = int(param.args[0]) - base
+                                if 0 <= rel < 3:
+                                    param.setResult(_jbox_long(-200 - (base - orig + rel)))
 
                     class SpeedClickHook(MethodHook):
                         def after_hooked_method(self, param):
+                            if getattr(plugin, "_unloaded", False):
+                                return
                             act = param.thisObject
                             try:
                                 lv = get_private_field(act, "listView")
-                                old_l = get_private_field(lv, "onItemClickListener")
-                                if old_l is not None and "SpeedPMClickListener" in str(old_l.getClass().getName()):
+                                if lv is None:
                                     return
+                                if _lv_already_wrapped(lv):
+                                    return
+                                old_l = get_private_field(lv, "onItemClickListener")
 
                                 class SpeedPMClickListener(dynamic_proxy(jclass("org.telegram.ui.Components.RecyclerListView$OnItemClickListener"))):
                                     def __init__(self):
                                         super().__init__()
 
                                     def onItemClick(self, view, pos):
-                                        orig = int(get_private_field(act, "rowCount") or 0)
-                                        diff = pos - orig
-                                        if diff < 7:
-                                            # ряды 0..orig+6 — активность и good_proxy.plugin
+                                        if getattr(plugin, "_unloaded", False):
                                             return old_l.onItemClick(view, pos) if old_l else None
-                                        if diff == 8:
+                                        orig = int(get_private_field(act, "rowCount") or 0)
+                                        base = _speed_base_for_act(act, orig)
+                                        rel = pos - base
+                                        if rel < 0 or rel >= 3:
+                                            return old_l.onItemClick(view, pos) if old_l else None
+                                        if rel == 1:
                                             plugin._on_check_current_proxy_speed(None)
-                                        elif diff == 9:
+                                        elif rel == 2:
                                             plugin._on_generate_speed_file_click(None)
 
                                 lv.setOnItemClickListener(SpeedPMClickListener())
+                                _mark_lv_wrapped(lv)
                             except Exception as e:
                                 _log(f"speed row click hook error: {e}")
+
+                    def _register_hook(method, hook):
+                        handle = self.hook_method(method, hook)
+                        if handle is not None:
+                            self._hooks.append(handle)
 
                     adapter_hooked = False
                     for m in AdapterCls.getDeclaredMethods():
                         if m.getName() == "getItemCount":
-                            self.hook_method(m, SpeedCountHook())
+                            _register_hook(m, SpeedCountHook())
                             adapter_hooked = True
                         elif m.getName() == "getItemViewType":
-                            self.hook_method(m, SpeedViewTypeHook())
+                            _register_hook(m, SpeedViewTypeHook())
                         elif m.getName() == "onBindViewHolder" and len(m.getParameterTypes()) == 2:
-                            self.hook_method(m, SpeedBindHook())
+                            _register_hook(m, SpeedBindHook())
                         elif m.getName() == "isEnabled" and len(m.getParameterTypes()) == 1:
-                            self.hook_method(m, SpeedEnabledHook())
+                            _register_hook(m, SpeedEnabledHook())
                         elif m.getName() == "getItemId" and len(m.getParameterTypes()) == 1:
-                            self.hook_method(m, SpeedIdHook())
+                            _register_hook(m, SpeedIdHook())
 
                     click_hooked = False
                     for m in ProxyListActivityCls.getDeclaredMethods():
                         if m.getName() == "createView":
-                            self.hook_method(m, SpeedClickHook())
+                            _register_hook(m, SpeedClickHook())
                             click_hooked = True
 
                     if adapter_hooked and click_hooked:
@@ -490,6 +690,40 @@ class GoodProxySpeedPlugin(BasePlugin):
             self._check_plugin_update(manual=False)
         except Exception as e:
             _log(f"on_plugin_load error: {e}")
+
+    def on_plugin_unload(self):
+        self._unloaded = True
+        ev = getattr(self, "_unload_event", None)
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+        timer = getattr(self, "_update_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            self._update_timer = None
+        ctx = getattr(self, "_speed_context", None)
+        if ctx is not None:
+            try:
+                self._finish_speed_context(ctx, error="Плагин выгружен.")
+            except Exception:
+                self._speed_context = None
+        for handle in list(getattr(self, "_hooks", ())):
+            try:
+                self.unhook_method(handle)
+            except Exception:
+                pass
+        if hasattr(self, "_hooks"):
+            self._hooks.clear()
+        if hasattr(self, "_speed_base_offsets"):
+            self._speed_base_offsets.clear()
+        if hasattr(self, "_wrapped_list_views"):
+            self._wrapped_list_views.clear()
+        _log("Plugin unloaded")
 
     def create_settings(self) -> list:
         try:
@@ -569,11 +803,14 @@ class GoodProxySpeedPlugin(BasePlugin):
                 return
 
         def task():
+            if getattr(self, "_unloaded", False):
+                return
             current_ver_tuple = _parse_semver(__version__)
-            highest_remote_version = None
-            highest_remote_bytes = None
+            candidates = []  # (version, base_url, host, data)
             errors = []
             for base_url in PLUGIN_UPDATE_URLS:
+                if getattr(self, "_unloaded", False):
+                    return
                 host = urlparse(base_url).hostname or base_url
                 sep = "&" if "?" in base_url else "?"
                 url = f"{base_url}{sep}t={int(time.time())}"
@@ -594,12 +831,7 @@ class GoodProxySpeedPlugin(BasePlugin):
                             m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', header_sample)
                             if m:
                                 cand_version = m.group(1).strip()
-                                cand_tuple = _parse_semver(cand_version)
-                                if highest_remote_version is None or cand_tuple > _parse_semver(highest_remote_version):
-                                    highest_remote_version = cand_version
-                                    highest_remote_bytes = data
-                                if cand_tuple > current_ver_tuple:
-                                    break
+                                candidates.append((cand_version, base_url, host, data))
                             else:
                                 errors.append(f"{host}: версия не распознана")
                         else:
@@ -610,34 +842,60 @@ class GoodProxySpeedPlugin(BasePlugin):
                     _log(f"Check update mirror {url} failed: {e}")
                     continue
 
-            if not highest_remote_bytes or not highest_remote_version:
+            if not candidates:
                 if manual:
                     details = "\n".join(errors[:3]) if errors else "Зеркала не вернули данных."
                     _notify("error", f"Не удалось проверить обновления Good Proxy Speed:\n{details}")
                 return
 
-            if _parse_semver(highest_remote_version) > current_ver_tuple:
-                try:
-                    target_file = None
-                    try:
-                        if "__file__" in globals() and __file__ and os.path.isfile(__file__):
-                            target_file = __file__
-                    except Exception:
-                        pass
-                    if not target_file:
-                        from file_utils import get_plugins_dir
-                        target_file = os.path.join(str(get_plugins_dir()), "good_proxy_speed.plugin")
-                    with open(target_file, "wb") as f:
-                        f.write(highest_remote_bytes)
-                    _log(f"Good Proxy Speed successfully updated to v{highest_remote_version} at {target_file}")
-                    _notify("success", f"Плагин Good Proxy Speed обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
-                except Exception as e:
-                    _log(f"Failed to write updated plugin file: {e}")
+            highest_remote_version = _select_consensus_version(
+                [(v, u, h) for v, u, h, _ in candidates], min_groups=2
+            )
+            if not highest_remote_version:
+                any_newer = any(_parse_semver(v) > current_ver_tuple for v, _, _, _ in candidates)
+                if any_newer:
+                    _log("Speed plugin update rejected: fewer than 2 independent mirror groups agree on version")
                     if manual:
-                        _notify("error", f"Сбой записи файла плагина: {e}")
-            else:
+                        _notify("error", "Обновление Good Proxy Speed отклонено: версия не подтверждена минимум на двух независимых зеркалах.")
+                elif manual:
+                    _notify("info", f"У вас установлена последняя версия Good Proxy Speed (v{__version__}).")
+                return
+
+            if _parse_semver(highest_remote_version) <= current_ver_tuple:
                 if manual:
                     _notify("info", f"У вас установлена последняя версия Good Proxy Speed (v{__version__}).")
+                return
+
+            matching_downloads = [
+                (base_url, host, data)
+                for ver, base_url, host, data in candidates
+                if ver == highest_remote_version
+            ]
+            consensus, verified = _select_consensus_payload(matching_downloads, min_groups=2)
+            if not consensus or not verified:
+                _log(f"Speed plugin update rejected: SHA-256 consensus failed for v{highest_remote_version}")
+                if manual:
+                    _notify("error", "Обновление Good Proxy Speed отклонено: не удалось подтвердить SHA-256 минимум на двух независимых зеркалах.")
+                return
+
+            try:
+                target_file = None
+                try:
+                    if "__file__" in globals() and __file__ and os.path.isfile(__file__):
+                        target_file = __file__
+                except Exception:
+                    pass
+                if not target_file:
+                    from file_utils import get_plugins_dir
+                    target_file = os.path.join(str(get_plugins_dir()), "good_proxy_speed.plugin")
+                _atomic_write_bytes(target_file, consensus["bytes"])
+                _log(f"Good Proxy Speed successfully updated to v{highest_remote_version} at {target_file} "
+                     f"(groups={sorted(consensus['groups'])})")
+                _notify("success", f"Плагин Good Proxy Speed обновлен до v{highest_remote_version}!\nПерезапустите Telegram для применения изменений.")
+            except Exception as e:
+                _log(f"Failed to write updated plugin file: {e}")
+                if manual:
+                    _notify("error", f"Сбой записи файла плагина: {e}")
 
         run_on_queue(task, PLUGINS_QUEUE)
 
@@ -887,14 +1145,10 @@ class GoodProxySpeedPlugin(BasePlugin):
         return type(error).__name__
 
     def _on_check_current_proxy_speed(self, context=None):
+        if getattr(self, "_unloaded", False):
+            return
         if getattr(self, "_bulk_speed_busy", False) or getattr(self, "_speed_context", None) is not None:
             return _notify("info", "Тест скорости уже выполняется.")
-        message_id = self._get_speed_test_message_id()
-        if message_id <= 0:
-            return _notify(
-                "error",
-                "Тестовый файл не найден. В меню выбора прокси нажмите иконку загрузки — тестовый файл отправится в «Избранное».",
-            )
         try:
             chunks_idx = int(self.get_setting("speed_test_chunks", 2))
         except Exception:
@@ -907,7 +1161,10 @@ class GoodProxySpeedPlugin(BasePlugin):
         run_on_queue(self._do_check_current_speed, PLUGINS_QUEUE)
 
     def _do_check_current_speed(self):
+        ctx = None
         try:
+            if getattr(self, "_unloaded", False):
+                return
             if getattr(self, "_bulk_speed_busy", False):
                 return _notify("info", "Пакетная проверка скорости уже выполняется.")
             if getattr(self, "_speed_context", None) is not None:
@@ -1006,11 +1263,19 @@ class GoodProxySpeedPlugin(BasePlugin):
                     plugin._on_speed_message_response(ctx, response, error)
 
             delegate = MessageDelegate()
-            ctx["delegates"].append(delegate)
-            cm.sendRequest(request, delegate, 2)
+            with ctx["lock"]:
+                if not ctx.get("active", False):
+                    return
+                ctx["delegates"].append(delegate)
+                req_id = cm.sendRequest(request, delegate, 2)
+                if req_id is not None:
+                    ctx["request_ids"].append(int(req_id))
         except Exception as e:
             _log(f"do check current speed error: {e}")
-            _notify("error", f"Ошибка подготовки теста: {type(e).__name__}")
+            if ctx is not None:
+                self._finish_speed_context(ctx, error=f"Ошибка подготовки теста: {type(e).__name__}")
+            else:
+                _notify("error", f"Ошибка подготовки теста: {type(e).__name__}")
 
     def _on_speed_message_response(self, ctx, response, error):
         if not self._speed_context_is_active(ctx):
@@ -1078,9 +1343,12 @@ class GoodProxySpeedPlugin(BasePlugin):
                         plugin._on_speed_chunk_response(ctx, chunk_resp, chunk_err)
 
                 delegate = ChunkDelegate()
-                ctx["delegates"].append(delegate)
-                req_id = cm.sendRequest(req, delegate, None, None, 0, int(dc_id), int(c_type), True)
-                ctx["request_ids"].append(int(req_id))
+                with ctx["lock"]:
+                    if not ctx.get("active", False):
+                        break
+                    ctx["delegates"].append(delegate)
+                    req_id = cm.sendRequest(req, delegate, None, None, 0, int(dc_id), int(c_type), True)
+                    ctx["request_ids"].append(int(req_id))
         except Exception as e:
             _log(f"prepare speed download error: {e}")
             return self._finish_speed_context(ctx, error=f"Сбой загрузки: {type(e).__name__}")
@@ -1175,14 +1443,24 @@ class GoodProxySpeedPlugin(BasePlugin):
                 "host": ctx.get("host", ""),
                 "port": ctx.get("port", 0),
             }
-            name_updated = self._set_native_proxy_speed_name(speed_record, speed_text)
-            if name_updated:
-                self._save_native_proxy_speed_names()
-                self._refresh_proxy_name_ui()
-            msg = f"{ctx.get('host')}: {speed_text}."
-            if name_updated:
-                msg += " Скорость записана в имя прокси."
-            return _notify("success", msg)
+            host_label = ctx.get("host")
+
+            def _apply_name_and_notify():
+                name_updated = False
+                try:
+                    name_updated = bool(self._set_native_proxy_speed_name(speed_record, speed_text))
+                    if name_updated:
+                        self._save_native_proxy_speed_names()
+                        self._refresh_proxy_name_ui()
+                except Exception as ui_err:
+                    _log(f"apply proxy speed name on UI thread error: {ui_err}")
+                msg = f"{host_label}: {speed_text}."
+                if name_updated:
+                    msg += " Скорость записана в имя прокси."
+                _notify("success", msg)
+
+            run_on_ui_thread(_apply_name_and_notify)
+            return True
         except Exception as e:
             _log(f"finish speed context error: {e}")
 
