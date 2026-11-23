@@ -18,9 +18,9 @@
       "app_version": ">=12.5.1",
       "sdk_version": ">=1.4.4.3",
       "icon": "OliverEmoji/21",
-      "sha256": "fdcf1a53bda1dba81f26fbaad467069e5073781c090e4d27610c483f33eb37f3",
-      "size": 151088,
-      "updated_at": "2026-11-22T18:19:54Z"
+      "sha256": "8ef669b0363c166860d80b14f1def9d77a8cfff1979740b98da991f222ccc25b",
+      "size": 161641,
+      "updated_at": "2026-11-23T22:43:55Z"
     },
     {
       "id": "good_proxy_speed",
@@ -35,9 +35,9 @@
       "app_version": ">=12.5.1",
       "sdk_version": ">=1.4.4.3",
       "icon": "msg2_speed",
-      "sha256": "fdabc2f3d7ff5043e0b786cbed430dc6bd57cd3797345067358ec2820bec2536",
-      "size": 56422,
-      "updated_at": "2026-11-22T18:19:54Z"
+      "sha256": "405e68adcedb32f60afb708d44a73f6989c2e382411d0c9178ef9140719546d9",
+      "size": 67412,
+      "updated_at": "2026-11-23T22:43:55Z"
     },
     {
       "id": "th3_proxy_tools",
@@ -53,7 +53,7 @@
       "icon": "exteraPlugins/1",
       "sha256": "38e2e4434a2aa245a70dd2ec7845eeb8fe423b111b4de76c79248c1480b7642d",
       "size": 95376,
-      "updated_at": "2026-11-22T18:19:54Z"
+      "updated_at": "2026-11-23T22:43:55Z"
     }
   ]
 }
