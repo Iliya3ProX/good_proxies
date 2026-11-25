@@ -1,27 +1,27 @@
 {
- "generated_at": "2026-11-25 17:32",
+ "generated_at": "2026-11-26 00:06",
  "check_interval_hours": 6,
  "pool": {
-  "total": 3535,
-  "alive": 2190,
-  "dead": 1345
+  "total": 3597,
+  "alive": 2195,
+  "dead": 1402
  },
  "tiers": {
-  "tier1": 118,
-  "tier2": 2072,
+  "tier1": 119,
+  "tier2": 2076,
   "tier3": 0,
-  "slow": 712
+  "slow": 680
  },
  "nodes": {
-  "pinned": 2,
-  "with_dead_nodes": 0,
-  "total": 4,
-  "alive": 4
+  "pinned": 1,
+  "with_dead_nodes": 1,
+  "total": 11,
+  "alive": 1
  },
  "ping": {
-  "best": 14,
-  "p50": 1601,
-  "avg": 1698
+  "best": 15,
+  "p50": 1620,
+  "avg": 1683
  },
  "speed": {
   "tested": 0,
@@ -30,5 +30,5 @@
   "best_mbs": 0.0
  },
  "countries": [],
- "web_alive": 49
+ "web_alive": 38
 }
